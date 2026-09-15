@@ -230,13 +230,16 @@ Because editing the running program's own code is dangerous, every self-edit goe
 2. drafts the **complete** new file for your purpose,
 3. **rejects it unless it parses** as valid Python,
 4. backs the original up (to `_self_edits/`), writes the new version,
-5. **runs the whole test suite - and rolls the file straight back if anything fails.**
+5. **runs the whole test suite - and rolls the file straight back if anything fails,**
+6. **commits the change to git** (starting a repo if there isn't one), so every self-edit is one revertible
+   commit - the reply tells you the hash and the `git revert <hash>` to undo it.
 
-So a self-edit only sticks if it compiles and the tests still pass. Core changes take effect on the next
-restart (the live process keeps the old code in memory); skill files hot-reload as usual. It's gated by the
-`self_edit` permission (allowed while autonomy is on); a few files (`keystore.py`, `permissions.py`, the
-self-editor and the sandbox) are **protected** and never rewritten. Turn off the safety net - at your own
-risk - with `self_edit.run_tests=false`.
+So a self-edit only sticks if it compiles and the tests still pass, and once it does you can always walk it
+back with git. Core changes take effect on the next restart (the live process keeps the old code in memory);
+skill files hot-reload as usual. It's gated by the `self_edit` permission (allowed while autonomy is on); a
+few files (`keystore.py`, `permissions.py`, the self-editor and the sandbox) are **protected** and never
+rewritten. Turn off the safety net - at your own risk - with `self_edit.run_tests=false`, or the git commits
+with `self_edit.git_commit=false`.
 
 ## The evolution loop
 
