@@ -100,15 +100,21 @@ class JarvisPanel:
         self._mgr = None
         self._refresh_autonomy_btn()
 
-        # The arc reactor: JARVIS's animated face, and its status light.
-        self.reactor = ArcReactor(self.root, height=190)
-        self.reactor.pack(fill="x", padx=8, pady=(2, 4))
         self._revert_after = None
+        # The chat box lives at the bottom; everything above it is the reactor. Pack the bottom
+        # pieces first (footer, input, transcript) so the reactor can expand to fill all the rest.
+        footer = tk.Label(self.root,
+                          text=f"Enter send · Esc hide · {self.hotkey} toggle · {self.interrupt_hotkey} stop · ctrl+shift+r clear",
+                          fg=C["dim"], bg=C["bg"], font=("Segoe UI", 8))
+        footer.pack(side="bottom", anchor="w", padx=14, pady=(0, 8))
+
+        self.bar = tk.Frame(self.root, bg=C["bg"])
+        self.bar.pack(side="bottom", fill="x", padx=14, pady=(6, 4))
 
         body = tk.Frame(self.root, bg=C["panel"])
-        body.pack(fill="both", expand=True, padx=14)
+        body.pack(side="bottom", fill="x", padx=14, pady=(0, 2))
         self.log = tk.Text(body, wrap="word", bg=C["panel"], fg=C["fg"], relief="flat", borderwidth=0,
-                           padx=12, pady=10, font=("Consolas", 10), state="disabled", cursor="arrow")
+                           padx=12, pady=8, font=("Consolas", 10), state="disabled", cursor="arrow", height=8)
         scrollbar = tk.Scrollbar(body, command=self.log.yview)
         self.log.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
@@ -119,8 +125,6 @@ class JarvisPanel:
         self.log.tag_configure("event", foreground=C["dim"], font=("Consolas", 9))
         self.log.tag_configure("error", foreground=C["error"])
 
-        self.bar = tk.Frame(self.root, bg=C["bg"])
-        self.bar.pack(fill="x", padx=14, pady=(10, 4))
         self.entry = tk.Entry(self.bar, bg=C["input"], fg=C["fg"], insertbackground=C["accent"], relief="flat",
                               font=("Segoe UI", 11), highlightthickness=1, highlightbackground=C["border"],
                               highlightcolor=C["accent"])
@@ -131,8 +135,10 @@ class JarvisPanel:
         self.root.bind("<Escape>", lambda _e: self.hide())
         self.root.bind_all("<Control-Shift-R>", self._hard_refresh)  # hard refresh: clear the transcript
         self.root.bind_all("<Control-Shift-r>", self._hard_refresh)
-        tk.Label(self.root, text=f"Enter send · Esc hide · {self.hotkey} toggle · {self.interrupt_hotkey} stop · ctrl+shift+r clear",
-                 fg=C["dim"], bg=C["bg"], font=("Segoe UI", 8)).pack(anchor="w", padx=14, pady=(0, 8))
+
+        # The reactor fills everything between the header and the chat box - JARVIS's animated face.
+        self.reactor = ArcReactor(self.root)
+        self.reactor.pack(side="top", fill="both", expand=True, padx=6, pady=(2, 4))
 
     def _write(self, text: str, tag: str | None = None) -> None:
         self.log.configure(state="normal")
