@@ -1,0 +1,1 @@
+"""The JARVIS workspace panel."""

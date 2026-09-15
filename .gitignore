@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+memory/data/
+evolution_engine/archive/
+skills/_*.installing
+_self_edits/

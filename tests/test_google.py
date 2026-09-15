@@ -1,0 +1,69 @@
+import unittest
+from unittest import mock
+
+from core import google
+from core.actions import ActionBroker, Blocked
+from core.permissions import PermissionRegistry
+from tests.helpers import IsolatedCase
+
+
+class GoogleAuthTests(IsolatedCase):
+    def test_access_token_refreshes_then_caches(self):
+        auth = google.GoogleAuth()
+        auth.set_credentials("client-id", "client-secret")
+        data = google._load()
+        data["refresh_token"] = "refresh"
+        google._save(data)
+
+        with mock.patch("core.google._post_token", return_value={"access_token": "AT1", "expires_in": 3600}) as post:
+            self.assertEqual(auth.access_token(), "AT1")
+            post.assert_called_once()
+        # still valid -> no second refresh call
+        with mock.patch("core.google._post_token", side_effect=AssertionError("should not refresh")):
+            self.assertEqual(auth.access_token(), "AT1")
+
+    def test_not_connected(self):
+        self.assertFalse(google.GoogleAuth().is_connected())
+        self.assertIsNone(google.GoogleAuth().access_token())
+
+
+class GoogleClientTests(IsolatedCase):
+    def test_drive_search_formats_results(self):
+        client = google.GoogleClient(google.GoogleAuth())
+        with mock.patch.object(client, "_get", return_value={"files": [
+                {"name": "Budget 2026.xlsx", "webViewLink": "https://drive/x"}]}):
+            out = client.search_drive("budget")
+        self.assertIn("Budget 2026.xlsx", out)
+        self.assertIn("https://drive/x", out)
+
+    def test_gmail_search_reads_headers(self):
+        client = google.GoogleClient(google.GoogleAuth())
+
+        def fake_get(url):
+            if "/messages/" in url:
+                return {"payload": {"headers": [{"name": "Subject", "value": "Your invoice"},
+                                                {"name": "From", "value": "alice@x.com"}]}}
+            return {"messages": [{"id": "1"}]}
+
+        with mock.patch.object(client, "_get", side_effect=fake_get):
+            out = client.search_gmail("from:alice")
+        self.assertIn("Your invoice", out)
+        self.assertIn("alice@x.com", out)
+
+
+class GoogleBrokerTests(IsolatedCase):
+    def test_not_connected_message(self):
+        broker = ActionBroker(permissions=PermissionRegistry(self.tmp / "p.json"), confirm=lambda req: "once")
+        self.assertIn("isn't connected", broker.search_drive("taxes"))
+
+    def test_google_is_gated(self):
+        broker = ActionBroker(permissions=PermissionRegistry(self.tmp / "p.json"), confirm=lambda req: "deny")
+        with self.assertRaises(Blocked):
+            broker.search_gmail("from:bob")
+
+    def test_dry_run_does_not_touch_google(self):
+        self.assertIn("unavailable during verification", ActionBroker(dry_run=True).search_drive("x"))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,606 @@
+"""Command line interface. Run `jarvis --help`."""
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import os
+import platform
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from . import __version__, keystore
+from .config import ROOT, load_settings, parse_value, set_user_value, unset_user_value, user_config_path
+
+DETACHED_PROCESS = 0x00000008
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+
+def _utf8_console() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
+def _print_event(_stage: str, message: str) -> None:
+    print(f"  .. {message}", flush=True)
+
+
+def _print_reply(reply) -> None:
+    print(reply.text)
+    meta = [reply.skill and f"skill: {reply.skill}", f"route: {reply.route}",
+            reply.provider and f"via {reply.provider}", f"{reply.elapsed_s:.1f}s"]
+    print("  [" + " | ".join(m for m in meta if m) + "]")
+
+
+def _pythonw() -> str:
+    exe = Path(sys.executable)
+    windowless = exe.with_name("pythonw.exe")
+    return str(windowless if windowless.exists() else exe)
+
+
+def _terminal_confirm(req) -> str:
+    """Ask permission for one action at the terminal."""
+    print(f"\n  JARVIS wants to: {req.summary}", flush=True)
+    if req.details:
+        print(f"    {req.details}")
+    try:
+        answer = input("  Allow?  [y] once  [a] always  [N] no: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return "deny"
+    return {"y": "once", "yes": "once", "o": "once", "a": "always", "always": "always"}.get(answer, "deny")
+
+
+# ---- assistant --------------------------------------------------------------------------------
+
+def cmd_ask(args) -> int:
+    from .orchestrator import Jarvis
+
+    jarvis = Jarvis(on_event=_print_event, confirm=_terminal_confirm)
+    _print_reply(jarvis.handle(" ".join(args.text), force_evolve=args.force))
+    return 0
+
+
+def cmd_chat(_args) -> int:
+    from .orchestrator import Jarvis
+
+    jarvis = Jarvis(on_event=_print_event, confirm=_terminal_confirm)
+    print("JARVIS chat. Type 'exit' to leave.")
+    while True:
+        try:
+            text = input("\nyou > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if text.lower() in {"exit", "quit"}:
+            return 0
+        if text:
+            _print_reply(jarvis.handle(text))
+
+
+def cmd_skills(args) -> int:
+    from .skill_loader import SkillRegistry
+
+    registry = SkillRegistry()
+    registry.reload()
+    for skill in sorted(registry.skills.values(), key=lambda s: (s.origin != "builtin", s.name)):
+        print(f"{skill.name:<26} {skill.origin:<8} {skill.description}")
+        if args.verbose:
+            for trigger in skill.trigger_sources:
+                print(f"{'':<36}/{trigger}/")
+    for filename, error in registry.errors.items():
+        print(f"[!!] {filename}: {error}")
+    return 0
+
+
+# ---- window / daemon ---------------------------------------------------------------------------
+
+def _spawn_daemon(show: bool) -> None:
+    argv = [_pythonw(), str(ROOT / "jarvis.py"), "daemon"] + (["--show"] if show else [])
+    subprocess.Popen(argv, cwd=str(ROOT), creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+
+
+def _control(command: str, start_if_missing: bool) -> int:
+    from window_manager import ipc
+
+    reply = ipc.send(command)
+    if reply is None:
+        if not start_if_missing:
+            print("JARVIS is not running.")
+            return 0
+        _spawn_daemon(show=True)
+        print("Starting JARVIS (the first launch takes a few seconds)...")
+        return 0
+    if not reply.get("ok"):
+        print(f"JARVIS: {reply.get('error', 'command failed')}")
+        return 1
+    return 0
+
+
+def cmd_toggle(_args) -> int:
+    return _control("toggle", start_if_missing=True)
+
+
+def cmd_on(_args) -> int:
+    return _control("show", start_if_missing=True)
+
+
+def cmd_off(_args) -> int:
+    return _control("hide", start_if_missing=False)
+
+
+def cmd_stop(_args) -> int:
+    return _control("quit", start_if_missing=False)
+
+
+def cmd_interrupt(_args) -> int:
+    return _control("interrupt", start_if_missing=False)
+
+
+def cmd_daemon(args) -> int:
+    from window_manager import ipc
+
+    if ipc.send("ping", timeout=1.0) is not None:
+        if args.show:
+            ipc.send("show")
+        print("JARVIS is already running.")
+        return 0
+    from ui.panel import run_daemon
+
+    return run_daemon(show=args.show)
+
+
+def _startup_link() -> Path:
+    return Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "JARVIS.lnk"
+
+
+def cmd_startup(args) -> int:
+    link = _startup_link()
+    if args.action == "disable":
+        link.unlink(missing_ok=True)
+        print("JARVIS will no longer start at sign-in.")
+        return 0
+    if args.action == "status":
+        print(f"Start at sign-in: {'enabled' if link.exists() else 'disabled'}  ({link})")
+        return 0
+    script = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:J_LINK);"
+              "$s.TargetPath=$env:J_TARGET;$s.Arguments=$env:J_ARGS;$s.WorkingDirectory=$env:J_DIR;"
+              "$s.Description='JARVIS assistant';$s.Save()")
+    env = dict(os.environ, J_LINK=str(link), J_TARGET=_pythonw(), J_ARGS=f'"{ROOT / "jarvis.py"}" daemon', J_DIR=str(ROOT))
+    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], env=env, check=True)
+    print(f"JARVIS will start in the background at sign-in ({link}).")
+    return 0
+
+
+# ---- permissions ---------------------------------------------------------------------------------
+
+def cmd_permissions(args) -> int:
+    from .permissions import CAPABILITIES, PermissionRegistry
+
+    registry = PermissionRegistry()
+    if args.reset:
+        registry.reset()
+        registry.set_autonomy(False)
+        print("All permissions reset to 'ask' (autonomy off).")
+        return 0
+    if registry.autonomy():
+        print("[autonomy ON] Every capability is currently allowed. Turn it off: jarvis autonomy off\n")
+    if args.capability and args.state:
+        registry.set(args.capability, args.state)
+        print(f"{args.capability} -> {args.state}")
+        return 0
+    if args.capability:
+        print(f"{args.capability}: {registry.state(args.capability)}")
+        return 0
+    labels = {"ask": "asks each time", "allow": "always allowed", "deny": "always blocked"}
+    print("What JARVIS may do on this PC (change with: jarvis permissions <capability> allow|deny|ask):\n")
+    for capability, description in CAPABILITIES.items():
+        state = registry.state(capability)
+        print(f"  {capability:<12} {labels[state]:<16} {description}")
+    return 0
+
+
+def cmd_autonomy(args) -> int:
+    """The 'unleash it' switch: while on, JARVIS acts without asking and may use risky calls."""
+    from .permissions import PermissionRegistry
+
+    registry = PermissionRegistry()
+    if args.mode in ("on", "off"):
+        registry.set_autonomy(args.mode == "on")
+    if registry.autonomy():
+        print("Autonomy is ON - JARVIS acts on every capability without asking, skips plan review, and lets\n"
+              "evolved skills use risky calls (delete files, run shell, eval). Turn it off: jarvis autonomy off")
+    else:
+        print("Autonomy is OFF - JARVIS asks before each new capability and shows plans for approval.\n"
+              "Unleash it: jarvis autonomy on")
+    return 0
+
+
+def cmd_improve(args) -> int:
+    """Ask JARVIS to rewrite one of its own evolved skills to be better."""
+    from .orchestrator import Jarvis
+
+    jarvis = Jarvis(on_event=_print_event, confirm=_terminal_confirm)
+    skill = jarvis.registry.get(args.skill)
+    if skill is None:
+        print(f"No skill named '{args.skill}'. See installed skills with: jarvis skills")
+        return 1
+    if skill.origin != "evolved":
+        print(f"'{args.skill}' is a built-in skill; I only improve skills I evolved myself.")
+        return 1
+    reason = " ".join(args.reason) if args.reason else "Make it more robust, clearer and more capable."
+    outcome = jarvis.evolution.improve(skill, reason=reason)
+    if outcome.kind == "skill":
+        print(f"Improved '{args.skill}' and verified the new version.")
+        return 0
+    print(f"Couldn't improve '{args.skill}': {outcome.detail or 'no better version verified'}")
+    return 1
+
+
+def cmd_edit_self(args) -> int:
+    """Have JARVIS rewrite one of its own source files (syntax-checked, tested, rolled back on failure)."""
+    from .orchestrator import Jarvis
+
+    jarvis = Jarvis(on_event=_print_event, confirm=_terminal_confirm)
+    instruction = " ".join(args.instruction)
+    result = jarvis._self_editor.edit(instruction) if jarvis._gate_self_edit() else None
+    if result is None:
+        print("Permission for self_edit was declined. Allow it with: jarvis permissions self_edit allow")
+        return 1
+    print(result.message)
+    return 0 if result.ok else 1
+
+
+# ---- configuration -------------------------------------------------------------------------------
+
+def cmd_google(args) -> int:
+    from .google import GoogleAuth
+
+    auth = GoogleAuth()
+    if args.action == "status":
+        print(f"Google: {auth.status()}")
+        return 0
+    if args.action == "logout":
+        auth.logout()
+        print("Disconnected from Google.")
+        return 0
+    if args.action == "setup":
+        print("Create a free OAuth client so JARVIS can read your Drive and Gmail:")
+        print("  1. https://console.cloud.google.com/  ->  create a project")
+        print("  2. APIs & Services > Enabled APIs: enable 'Google Drive API' and 'Gmail API'")
+        print("  3. OAuth consent screen: External; add your own email as a Test user")
+        print("  4. Credentials > Create credentials > OAuth client ID > application type 'Desktop app'")
+        print("  5. Paste the Client ID and Client secret below.\n")
+        client_id = input("Client ID: ").strip()
+        client_secret = getpass.getpass("Client secret (hidden): ").strip()
+        if not client_id or not client_secret:
+            print("Nothing saved.")
+            return 1
+        auth.set_credentials(client_id, client_secret)
+        print("Saved (encrypted). Now run:  jarvis google login")
+        return 0
+    print("Opening your browser to sign in to Google...")
+    print(auth.login())
+    return 0
+
+
+def _learning_store():
+    from memory.learning import LearningStore
+
+    from .config import MEMORY_DIR
+
+    return LearningStore(MEMORY_DIR)
+
+
+def cmd_teach(args) -> int:
+    from .skill_loader import SkillRegistry
+
+    skill = args.skill.strip()
+    phrase = " ".join(args.phrase).strip()
+    registry = SkillRegistry()
+    registry.reload()
+    if registry.get(skill) is None:
+        known = ", ".join(sorted(registry.skills)) or "(none)"
+        print(f"No skill called '{skill}'. Known skills: {known}")
+        return 1
+    _learning_store().teach(phrase, skill)
+    print(f"Learned: messages like '{phrase}' will use the '{skill}' skill.")
+    return 0
+
+
+def cmd_lessons(args) -> int:
+    store = _learning_store()
+    if args.clear:
+        for path in (store.lessons_path, store.hints_path):
+            path.unlink(missing_ok=True)
+        print("Cleared all lessons and learned routes.")
+        return 0
+    hints = store.hints()
+    print(f"Learned routes ({len(hints)}):")
+    for hint in hints[-20:]:
+        print(f"  '{hint.get('phrase', '')}' -> {hint.get('skill')}  ({hint.get('source')})")
+    print(f"\nRecent lessons ({store.lesson_count()} total):")
+    for text in store.recent_lessons(limit=20):
+        print(f"  - {text}")
+    return 0
+
+
+def _key_problem(key: str) -> str | None:
+    """Why a pasted key looks invalid, or None if it's plausible. Catches the Ctrl+V (^V / \\x16) mistake."""
+    if not key:
+        return "nothing was entered"
+    if any(ord(c) < 0x20 for c in key):
+        return "it contains control characters - Ctrl+V was typed instead of pasting"
+    if len(key) < 12 or " " in key:
+        return "it's too short or has spaces"
+    return None
+
+
+def cmd_setkey(args) -> int:
+    provider = args.provider.lower()
+    if provider not in keystore.ENV_VARS:
+        print(f"Unknown provider '{provider}'. Keys are only needed for: {', '.join(keystore.ENV_VARS)}")
+        return 1
+    if args.clear:
+        print("Key removed." if keystore.clear_key(provider) else "No stored key to remove.")
+        return 0
+    hints = {"groq": "console.groq.com", "gemini": "aistudio.google.com/apikey"}
+    if provider in hints:
+        print(f"Get a {provider} key at {hints[provider]}")
+    print("Tip: paste with RIGHT-CLICK or Ctrl+Shift+V - Ctrl+V does not paste in a terminal.")
+    if args.show:
+        key = input(f"Paste your {provider} API key: ").strip()
+    else:
+        key = getpass.getpass(f"Paste your {provider} API key (hidden; press Enter after pasting): ").strip()
+
+    problem = _key_problem(key)
+    if problem:
+        print(f"That didn't look like a valid key ({problem}).")
+        print("Paste with right-click (or Ctrl+Shift+V). If it keeps failing, run:  jarvis setkey "
+              f"{provider} --show   to paste it visibly, or set the {keystore.ENV_VARS[provider]} "
+              "environment variable instead.")
+        return 1
+    keystore.store_key(provider, key)
+    settings = load_settings()
+    print(f"Stored the {provider} key for this Windows account, encrypted with DPAPI.")
+    print(f"Provider selection is unchanged: provider={settings.get('llm.provider')}, "
+          f"order={' > '.join(settings.get('llm.fallback_order') or [])}")
+    return 0
+
+
+def cmd_config(args) -> int:
+    if args.set:
+        key, sep, raw = args.set.partition("=")
+        if not sep or not key.strip():
+            print("Use: jarvis config --set section.key=value")
+            return 1
+        set_user_value(key.strip(), parse_value(raw))
+        print(f"Set {key.strip()} in {user_config_path()}")
+    if args.unset:
+        print(f"Removed {args.unset}." if unset_user_value(args.unset) else f"{args.unset} was not set.")
+    if not args.set and not args.unset:
+        print(json.dumps(load_settings().data, indent=2))
+        print(f"\nuser config: {user_config_path()}")
+    return 0
+
+
+def _user_env(name: str) -> str | None:
+    """A user-level environment variable as saved in the registry (what a newly started Ollama sees)."""
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            return str(winreg.QueryValueEx(key, name)[0])
+    except OSError:
+        return os.environ.get(name)
+
+
+def cmd_doctor(args) -> int:
+    from memory.store import MemoryStore
+    from window_manager import ipc
+    from window_manager.hotkey import parse_hotkey
+
+    from .config import MEMORY_DIR
+    from .llm_router import LLMError, LLMRouter
+    from .skill_loader import SkillRegistry
+    from .winsys import memory_status
+
+    settings = load_settings()
+    mark = lambda ok: "[ok]" if ok else "[--]"
+
+    print(f"JARVIS {__version__} doctor")
+    print(f"  python     {platform.python_version()}  {sys.executable}")
+    print(f"  root       {ROOT}")
+    config_path = user_config_path()
+    print(f"  config     {config_path}{'' if config_path.exists() else '  (not created; defaults in use)'}")
+    ram = memory_status()
+    if ram:
+        print(f"  RAM        {ram.total_gb:.1f} GB total, {ram.available_gb:.1f} GB available ({ram.load_percent}% in use)")
+
+    router = LLMRouter(settings)
+    print("\nLLM")
+    print(f"  provider        {settings.get('llm.provider')}  (from {settings.origin('llm.provider')})")
+    print(f"  fallback order  {' > '.join(router.order())}  (from {settings.origin('llm.fallback_order')})")
+    status = {name: (ok, reason, model) for name, ok, reason, model in router.status()}
+    for name, (ok, reason, model) in status.items():
+        print(f"  {mark(ok)} {name:<7} {model:<34} {reason}")
+    next_provider = next((n for n in router.order() if status.get(n, (False,))[0]), None)
+    print(f"  next call goes to: {next_provider or 'nothing - no provider is available'}")
+    if "ollama" in router.order():
+        tuning = ("OLLAMA_FLASH_ATTENTION", "OLLAMA_KV_CACHE_TYPE", "OLLAMA_MAX_LOADED_MODELS", "OLLAMA_NUM_PARALLEL")
+        missing = [name for name in tuning if not _user_env(name)]
+        print(f"  {mark(not missing)} Ollama memory tuning: {'set' if not missing else 'missing ' + ', '.join(missing)}")
+        if ram and ram.available_gb < 1.2:
+            print(f"  [!!] only {ram.available_gb:.1f} GB RAM free right now; close Chrome before JARVIS builds a skill")
+    if args.live and next_provider:
+        router.on_progress = lambda message: print(f"  .. {message}", flush=True)
+        started = time.monotonic()
+        try:
+            text = router.complete("Reply with exactly: OK", temperature=0.0, max_tokens=32)
+            print(f"  live test: {router.last_provider} replied {text.strip()[:30]!r} in {time.monotonic() - started:.1f}s")
+        except LLMError as exc:
+            print(f"  live test failed: {exc}")
+
+    registry = SkillRegistry()
+    registry.reload()
+    evolved = sum(1 for s in registry.skills.values() if s.origin == "evolved")
+    print("\nSkills")
+    print(f"  {len(registry.skills)} loaded ({len(registry.skills) - evolved} built-in, {evolved} evolved)")
+    for filename, error in registry.errors.items():
+        print(f"  [!!] {filename}: {error}")
+
+    print("\nEvolution")
+    print(f"  enabled={settings.get('evolution.enabled')}  attempts={settings.get('evolution.max_attempts')}  "
+          f"sandbox={settings.get('evolution.sandbox_timeout_s')}s/{settings.get('evolution.sandbox_memory_mb')}MB  "
+          f"risky calls allowed={settings.get('evolution.allow_risky_calls')}")
+    memory = MemoryStore(MEMORY_DIR)
+    print(f"  memory: {len(memory.interactions())} interactions, {len(memory.evolution_events())} evolution events")
+
+    from memory.learning import LearningStore
+
+    learning = LearningStore(MEMORY_DIR)
+    print(f"  learning: {len(learning.hints())} learned routes, {learning.lesson_count()} lessons")
+
+    from .google import GoogleAuth
+
+    print(f"  google: {GoogleAuth().status()}")
+
+    from .permissions import CAPABILITIES, PermissionRegistry
+
+    perms = PermissionRegistry()
+    if perms.autonomy():
+        print("\nPermissions  [AUTONOMY ON - acts without asking; turn off: jarvis autonomy off]")
+        for capability in CAPABILITIES:
+            print(f"  {capability:<12} allow (autonomy)")
+    else:
+        print("\nPermissions (jarvis permissions <capability> allow|deny|ask;  unleash: jarvis autonomy on)")
+        for capability in CAPABILITIES:
+            print(f"  {capability:<12} {perms.state(capability)}")
+
+    print("\nWindow")
+    hotkey = str(settings.get("window.hotkey"))
+    try:
+        parse_hotkey(hotkey)
+        hotkey_ok = True
+    except ValueError as exc:
+        hotkey_ok = False
+        hotkey += f"  (invalid: {exc})"
+    print(f"  {mark(hotkey_ok)} hotkey {hotkey}   split {settings.get('window.split')}/{1 - float(settings.get('window.split')):.1f}, "
+          f"JARVIS on the {settings.get('window.jarvis_side')}")
+    interrupt = str(settings.get("window.interrupt_hotkey", "ctrl+alt+c"))
+    try:
+        parse_hotkey(interrupt)
+        interrupt_ok = True
+    except ValueError as exc:
+        interrupt_ok = False
+        interrupt += f"  (invalid: {exc})"
+    print(f"  {mark(interrupt_ok)} interrupt hotkey {interrupt}   (stops the current task)")
+    ping = ipc.send("ping", timeout=1.0)
+    if ping:
+        hotkey_state = ping.get("hotkey_error") or "hotkey registered"
+        print(f"  [ok] daemon running (pid {ping.get('pid')}, {'visible' if ping.get('visible') else 'hidden'}, {hotkey_state})")
+    else:
+        print("  [--] daemon not running (start it with: jarvis on)")
+    return 0
+
+
+# ---- parser -------------------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="jarvis", description="JARVIS 1.0: a self-evolving assistant for Windows. "
+                                                                "With no command, toggles the 60/40 split view.")
+    parser.add_argument("--version", action="version", version=f"JARVIS {__version__}")
+    sub = parser.add_subparsers(dest="command", metavar="command")
+
+    for name, func, text in [
+        ("toggle", cmd_toggle, "show or hide JARVIS in the 60/40 split (starts it if needed)"),
+        ("on", cmd_on, "show JARVIS in the 60/40 split"),
+        ("off", cmd_off, "hide JARVIS and restore your window"),
+        ("stop", cmd_stop, "quit the background JARVIS process"),
+        ("interrupt", cmd_interrupt, "stop whatever JARVIS is currently doing"),
+        ("chat", cmd_chat, "chat with JARVIS in this terminal"),
+    ]:
+        sub.add_parser(name, help=text).set_defaults(func=func)
+
+    ask = sub.add_parser("ask", help="one request, answered in the terminal")
+    ask.add_argument("text", nargs="+")
+    ask.set_defaults(func=cmd_ask, force=False)
+
+    evolve = sub.add_parser("evolve", help="build a new skill for this request even if one seems to match")
+    evolve.add_argument("text", nargs="+")
+    evolve.set_defaults(func=cmd_ask, force=True)
+
+    daemon = sub.add_parser("daemon", help="run the hotkey listener and panel (normally started for you)")
+    daemon.add_argument("--show", action="store_true")
+    daemon.set_defaults(func=cmd_daemon)
+
+    skills = sub.add_parser("skills", help="list installed skills")
+    skills.add_argument("-v", "--verbose", action="store_true", help="show triggers")
+    skills.set_defaults(func=cmd_skills)
+
+    doctor = sub.add_parser("doctor", help="check providers, skills, hotkey and daemon")
+    doctor.add_argument("--live", action="store_true", help="also send a tiny test prompt to the LLM")
+    doctor.set_defaults(func=cmd_doctor)
+
+    setkey = sub.add_parser("setkey", help="store an API key (encrypted, never changes provider selection)")
+    setkey.add_argument("provider")
+    setkey.add_argument("--clear", action="store_true")
+    setkey.add_argument("--show", action="store_true", help="paste the key visibly (if hidden paste won't work)")
+    setkey.set_defaults(func=cmd_setkey)
+
+    config = sub.add_parser("config", help="show settings, or --set/--unset a user setting")
+    config.add_argument("--set", metavar="KEY=VALUE")
+    config.add_argument("--unset", metavar="KEY")
+    config.set_defaults(func=cmd_config)
+
+    startup = sub.add_parser("startup", help="start JARVIS at Windows sign-in")
+    startup.add_argument("action", choices=["enable", "disable", "status"])
+    startup.set_defaults(func=cmd_startup)
+
+    from .permissions import CAPABILITIES, STATES
+
+    permissions = sub.add_parser("permissions", help="show or change what JARVIS may do on this PC")
+    permissions.add_argument("capability", nargs="?", choices=list(CAPABILITIES))
+    permissions.add_argument("state", nargs="?", choices=list(STATES))
+    permissions.add_argument("--reset", action="store_true", help="set every capability back to 'ask'")
+    permissions.set_defaults(func=cmd_permissions)
+
+    autonomy = sub.add_parser("autonomy", help="unleash JARVIS: act without asking (on|off|status)")
+    autonomy.add_argument("mode", nargs="?", default="status", choices=["on", "off", "status"])
+    autonomy.set_defaults(func=cmd_autonomy)
+
+    improve = sub.add_parser("improve", help="have JARVIS rewrite one of its own evolved skills")
+    improve.add_argument("skill")
+    improve.add_argument("reason", nargs="*", help="what to make better (optional)")
+    improve.set_defaults(func=cmd_improve)
+
+    edit_self = sub.add_parser("edit-self", help="have JARVIS rewrite its own source code (tested, auto-rollback)")
+    edit_self.add_argument("instruction", nargs="+", help="what to change, e.g. 'add a /uptime command to core/cli.py'")
+    edit_self.set_defaults(func=cmd_edit_self)
+
+    teach = sub.add_parser("teach", help="teach JARVIS that a phrasing should use a given skill")
+    teach.add_argument("skill")
+    teach.add_argument("phrase", nargs="+")
+    teach.set_defaults(func=cmd_teach)
+
+    lessons = sub.add_parser("lessons", help="show what JARVIS has learned (routes and lessons)")
+    lessons.add_argument("--clear", action="store_true", help="forget all learned routes and lessons")
+    lessons.set_defaults(func=cmd_lessons)
+
+    google = sub.add_parser("google", help="connect Google Drive + Gmail (setup, login, status, logout)")
+    google.add_argument("action", nargs="?", default="login", choices=["setup", "login", "status", "logout"])
+    google.set_defaults(func=cmd_google)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    _utf8_console()
+    args = build_parser().parse_args(argv)
+    func = getattr(args, "func", cmd_toggle)
+    return int(func(args) or 0)
