@@ -67,6 +67,51 @@ class ConfigTests(IsolatedCase):
             self.assertEqual(router.complete("hello"), "hi")  # groq has no key -> gemini answers
         self.assertEqual(router.last_provider, "gemini")
 
+
+class UsageAndModelTests(IsolatedCase):
+    def test_usage_store_accumulates_and_resets(self):
+        from core.usage import UsageStore
+        store = UsageStore(self.tmp / "usage.json")
+        store.record("groq", 10, 5)
+        store.record("groq", 3, 2)
+        store.record("gemini", 1, 1)
+        data = store.all()
+        self.assertEqual((data["groq"]["calls"], data["groq"]["prompt_tokens"], data["groq"]["completion_tokens"]),
+                         (2, 13, 7))
+        self.assertEqual(data["gemini"]["calls"], 1)
+        store.reset()
+        self.assertEqual(store.all(), {})
+
+    def test_router_records_usage_of_the_answering_provider(self):
+        class Capturing:
+            def __init__(self):
+                self.records = []
+
+            def record(self, provider, prompt_tokens=0, completion_tokens=0):
+                self.records.append((provider, prompt_tokens, completion_tokens))
+
+        provider = FakeProvider("x", answer="hi")
+        provider.last_usage = {"prompt": 12, "completion": 4}
+        cap = Capturing()
+        os.environ["JARVIS_LLM__PROVIDER"] = "x"  # pin so the router uses our fake provider
+        router = LLMRouter(load_settings(), providers={"x": provider}, usage=cap)
+        self.assertEqual(router.complete("hi"), "hi")
+        self.assertEqual(cap.records, [("x", 12, 4)])
+
+    def test_set_model_pins_persists_and_rebuilds(self):
+        from core.orchestrator import Jarvis
+        from core.skill_loader import SkillRegistry
+        from memory.store import MemoryStore
+        jarvis = Jarvis(load_settings(), registry=SkillRegistry(self.tmp / "skills"),
+                        memory=MemoryStore(self.tmp / "memory"))
+        msg = jarvis.set_model("gemini")
+        self.assertIn("gemini", msg)
+        self.assertEqual(jarvis.llm.order(), ["gemini"])           # pinned live
+        self.assertEqual(load_settings().get("llm.provider"), "gemini")  # persisted
+        jarvis.set_model("auto")
+        self.assertEqual(load_settings().get("llm.provider"), "auto")
+        self.assertEqual(jarvis.set_model("nope"), "Unknown model 'nope'. Choose one of: auto, gemini, groq, ollama.")
+
     def test_environment_key_wins(self):
         keystore.store_key("groq", "stored")
         os.environ["GROQ_API_KEY"] = "from-env"

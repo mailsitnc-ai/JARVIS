@@ -222,6 +222,56 @@ def cmd_autonomy(args) -> int:
     return 0
 
 
+def cmd_usage(args) -> int:
+    """Show how much each model (groq / gemini / ollama) has been used."""
+    from .usage import UsageStore
+
+    store = UsageStore()
+    if args.reset:
+        store.reset()
+        print("Model usage counters reset.")
+        return 0
+    data = store.all()
+    if not data:
+        print("No model usage recorded yet. Ask JARVIS something that uses a cloud model.")
+        return 0
+    print("Model usage (calls and tokens per model):\n")
+    print(f"  {'model':<9} {'calls':>7} {'in tokens':>11} {'out tokens':>11} {'total':>11}   last used")
+    tc = ti = to = 0
+    for name in sorted(data, key=lambda n: -int(data[n].get("calls", 0))):
+        row = data[name]
+        ca, pin, pout = int(row.get("calls", 0)), int(row.get("prompt_tokens", 0)), int(row.get("completion_tokens", 0))
+        tc += ca; ti += pin; to += pout
+        print(f"  {name:<9} {ca:>7} {pin:>11,} {pout:>11,} {pin + pout:>11,}   {row.get('last_used', '-')}")
+    print(f"  {'TOTAL':<9} {tc:>7} {ti:>11,} {to:>11,} {ti + to:>11,}")
+    return 0
+
+
+def cmd_model(args) -> int:
+    """Show or manually switch which model JARVIS uses (auto walks the fallback chain)."""
+    from .config import load_settings, set_user_value
+    from window_manager import ipc
+
+    valid = ["auto", "groq", "gemini", "ollama"]
+    if not args.name:
+        s = load_settings()
+        pinned = str(s.get("llm.provider", "auto") or "auto")
+        order = s.get("llm.fallback_order") or []
+        order = order if isinstance(order, list) else str(order).split(",")
+        print(f"Current model: {pinned}" + ("" if pinned != "auto" else f"  (auto -> {' > '.join(order)})"))
+        print(f"Switch with:  jarvis model <{'|'.join(valid)}>")
+        return 0
+    name = args.name.strip().lower()
+    if name not in valid:
+        print(f"Unknown model '{name}'. Choose one of: {', '.join(valid)}")
+        return 1
+    set_user_value("llm.provider", name)
+    live = ipc.send("reloadconfig", timeout=2)
+    where = "applied live" if (live and live.get("ok")) else "saved (applies when JARVIS is running/restarts)"
+    print(f"Model set to '{name}' - {where}.")
+    return 0
+
+
 def cmd_improve(args) -> int:
     """Ask JARVIS to rewrite one of its own evolved skills to be better."""
     from .orchestrator import Jarvis
@@ -431,7 +481,14 @@ def cmd_doctor(args) -> int:
     for name, (ok, reason, model) in status.items():
         print(f"  {mark(ok)} {name:<7} {model:<34} {reason}")
     next_provider = next((n for n in router.order() if status.get(n, (False,))[0]), None)
-    print(f"  next call goes to: {next_provider or 'nothing - no provider is available'}")
+    pinned = str(settings.get("llm.provider", "auto") or "auto")
+    print(f"  next call goes to: {next_provider or 'nothing - no provider is available'}"
+          f"   (model: {pinned}; change with: jarvis model <name>)")
+    from .usage import UsageStore
+    used = UsageStore().all()
+    if used:
+        parts = [f"{n} x{int(r.get('calls', 0))}" for n, r in sorted(used.items(), key=lambda kv: -int(kv[1].get('calls', 0)))]
+        print(f"  usage so far: {', '.join(parts)}   (full table: jarvis usage)")
     if "ollama" in router.order():
         tuning = ("OLLAMA_FLASH_ATTENTION", "OLLAMA_KV_CACHE_TYPE", "OLLAMA_MAX_LOADED_MODELS", "OLLAMA_NUM_PARALLEL")
         missing = [name for name in tuning if not _user_env(name)]
@@ -574,6 +631,14 @@ def build_parser() -> argparse.ArgumentParser:
     autonomy = sub.add_parser("autonomy", help="unleash JARVIS: act without asking (on|off|status)")
     autonomy.add_argument("mode", nargs="?", default="status", choices=["on", "off", "status"])
     autonomy.set_defaults(func=cmd_autonomy)
+
+    usage = sub.add_parser("usage", help="show how much each model has been used")
+    usage.add_argument("--reset", action="store_true", help="clear the usage counters")
+    usage.set_defaults(func=cmd_usage)
+
+    model = sub.add_parser("model", help="show or switch which model JARVIS uses")
+    model.add_argument("name", nargs="?", help="auto | groq | gemini | ollama")
+    model.set_defaults(func=cmd_model)
 
     improve = sub.add_parser("improve", help="have JARVIS rewrite one of its own evolved skills")
     improve.add_argument("skill")

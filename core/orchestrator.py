@@ -592,6 +592,42 @@ class Jarvis:
             return f"{note}. Model order is now: {' > '.join(self.llm.order())} (was {old}).", None, "preference"
         return f"{note} (was {old}). It takes effect from now on.", None, "preference"
 
+    def _rebuild_llm(self) -> None:
+        """Point the router (and everything that holds it) at the current settings."""
+        self.llm = LLMRouter(self.settings)
+        if hasattr(self.llm, "on_progress"):
+            self.llm.on_progress = lambda message: self._emit("llm", message)
+        self.evolution.llm = self.llm
+        if getattr(self, "_self_editor", None) is not None:
+            self._self_editor.llm = self.llm
+
+    def reload_settings(self) -> list[str]:
+        """Re-read config from disk and rebuild the router (used when a setting changed elsewhere)."""
+        from .config import load_settings
+        self.settings = load_settings()
+        self._rebuild_llm()
+        return self.llm.order()
+
+    def set_model(self, name: str) -> str:
+        """Manually pick which model to use: a provider name pins it, 'auto' walks the fallback chain."""
+        from .config import load_settings, set_user_value
+        name = (name or "auto").strip().lower()
+        valid = {"auto"} | set(self.llm.providers)
+        if name not in valid:
+            return f"Unknown model '{name}'. Choose one of: {', '.join(sorted(valid))}."
+        set_user_value("llm.provider", name)
+        self.settings = load_settings()
+        self._rebuild_llm()
+        if name == "auto":
+            return f"Model set to auto - it now walks: {' > '.join(self.llm.order())}."
+        return f"Model pinned to {name} ({getattr(self.llm.providers.get(name), 'model', '')})."
+
+    def model_status(self) -> dict:
+        """Current pinning + which provider each call goes to now, for display."""
+        pinned = str(self.settings.get("llm.provider", "auto") or "auto").lower()
+        nxt = next((n for n, ok, _r, _m in self.llm.status() if ok), None)
+        return {"pinned": pinned, "order": self.llm.order(), "next": nxt, "status": self.llm.status()}
+
     @staticmethod
     def _coerce_setting(setting: str, value):
         try:

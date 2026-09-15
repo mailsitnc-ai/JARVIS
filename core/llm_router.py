@@ -98,6 +98,7 @@ class OpenAICompatProvider:
         self.timeout = float(settings.get("llm.timeout_s", 60))
         self.max_retries = int(settings.get("llm.max_retries", 4))
         self._sleep = sleep
+        self.last_usage: dict = {}
 
     @property
     def model(self) -> str:
@@ -130,6 +131,9 @@ class OpenAICompatProvider:
                     raise LLMError(f"{self.name}: unexpected response: {response.text[:200]}")
                 if not content.strip():
                     raise LLMError(f"{self.name}: empty response")
+                usage = (response.body or {}).get("usage") or {}
+                self.last_usage = {"prompt": usage.get("prompt_tokens", 0),
+                                   "completion": usage.get("completion_tokens", 0)}
                 return content
 
             detail = _error_detail(response)
@@ -201,6 +205,7 @@ class OllamaProvider:
     def __init__(self, settings: Settings):
         self.cfg = settings.get("llm.ollama", {}) or {}
         self._tried_autostart = False
+        self.last_usage: dict = {}
 
     @property
     def model(self) -> str:
@@ -332,6 +337,8 @@ class OllamaProvider:
                             progress(f"Local model writing: {len(parts)} tokens ({rate:.1f}/s)")
                             last_report = now
                     if chunk.get("done"):
+                        self.last_usage = {"prompt": chunk.get("prompt_eval_count", 0),
+                                           "completion": chunk.get("eval_count", 0)}
                         break
         except OSError as exc:
             raise LLMError(f"ollama: stream interrupted: {exc}") from exc
@@ -346,11 +353,15 @@ PROVIDERS = {"groq": GroqProvider, "gemini": GeminiProvider, "ollama": OllamaPro
 
 
 class LLMRouter:
-    def __init__(self, settings: Settings, providers: dict | None = None):
+    def __init__(self, settings: Settings, providers: dict | None = None, usage=None):
         self.settings = settings
         self.providers = providers if providers is not None else {name: cls(settings) for name, cls in PROVIDERS.items()}
         self.last_provider: str | None = None
         self.on_progress = None  # callable(str) for status updates during slow local generation
+        if usage is None:
+            from .usage import UsageStore
+            usage = UsageStore()
+        self.usage = usage
 
     def order(self) -> list[str]:
         pinned = str(self.settings.get("llm.provider", "auto") or "auto").strip().lower()
@@ -388,6 +399,11 @@ class LLMRouter:
                 failures.append(str(exc))
                 continue
             self.last_provider = name
+            u = getattr(provider, "last_usage", None) or {}
+            try:
+                self.usage.record(name, u.get("prompt", 0), u.get("completion", 0))
+            except Exception:
+                pass
             return text
         raise LLMError("no LLM provider could answer: " + (" | ".join(failures) or "none configured"))
 

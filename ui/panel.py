@@ -35,6 +35,7 @@ HELP = """Commands
   /skills       list skills           /reload   hot-reload the skills folder
   /permissions  what JARVIS may do    /teach <skill> <phrase>   bind a phrasing to a skill
   /autonomy on|off  unleash / re-gate /lessons  what JARVIS learned
+  /model [name]  show/switch the model  /usage    model usage per model
   /clear        clear this panel (or Ctrl+Shift+R)    /hide  hide JARVIS (or Esc)
 Anything else is a request. If no skill can handle it, JARVIS builds one.
 By default actions on your PC ask for approval. Turn on autonomy (🔥 header button) to let it act freely.
@@ -95,10 +96,15 @@ class JarvisPanel:
                                        activebackground=C["panel"], relief="flat", cursor="hand2",
                                        font=("Segoe UI", 8))
         self._autonomy_btn.pack(side="right", padx=(6, 0))
+        self._model_btn = tk.Button(header, text="", command=self._cycle_model, bg=C["bg"], fg=C["dim"],
+                                    activebackground=C["panel"], relief="flat", cursor="hand2",
+                                    font=("Segoe UI", 8))
+        self._model_btn.pack(side="right", padx=(6, 0))
         self.status = tk.Label(header, text="booting", fg=C["dim"], bg=C["bg"], font=("Consolas", 8))
         self.status.pack(side="right")
         self._mgr = None
         self._refresh_autonomy_btn()
+        self._refresh_model_btn()
 
         self._revert_after = None
         # The chat box lives at the bottom; everything above it is the reactor. Pack the bottom
@@ -188,6 +194,33 @@ class JarvisPanel:
         else:
             self._autonomy_btn.config(text="🔒 gated", fg=C["dim"])
 
+    def _refresh_model_btn(self) -> None:
+        """Show the current model in the header (pinned name, or 'auto→provider')."""
+        label = "model"
+        try:
+            if self.jarvis is not None:
+                ms = self.jarvis.model_status()
+                pinned = ms["pinned"]
+                label = f"◆ {pinned}" if pinned != "auto" else f"◆ auto·{ms.get('next') or '?'}"
+        except Exception:
+            pass
+        self._model_btn.config(text=label)
+
+    def _cycle_model(self) -> None:
+        """Click the header model button to rotate auto -> groq -> gemini -> ollama -> auto, live."""
+        if not self.jarvis:
+            return
+        order = ["auto", "groq", "gemini", "ollama"]
+        try:
+            cur = self.jarvis.model_status()["pinned"]
+        except Exception:
+            cur = "auto"
+        nxt = order[(order.index(cur) + 1) % len(order)] if cur in order else "auto"
+        msg = self.jarvis.set_model(nxt)
+        self._refresh_model_btn()
+        self._refresh_status()
+        self._write(f"  · {msg}\n", "event")
+
     def _toggle_autonomy(self) -> None:
         if not self.jarvis:
             return
@@ -255,6 +288,7 @@ class JarvisPanel:
                 elif kind == "status":
                     self._refresh_status()
                     self._refresh_autonomy_btn()
+                    self._refresh_model_btn()
                     if self.reactor.state_name == "offline":
                         self._set_reactor("idle")
                 elif kind == "reply":
@@ -278,6 +312,12 @@ class JarvisPanel:
                         self._write("  · Interrupting - stopping at the next step...\n", "event")
                     elif self.jarvis is not None:
                         self._write("  · Nothing running to interrupt.\n", "event")
+                elif kind == "reloadconfig":
+                    if self.jarvis is not None:
+                        order = self.jarvis.reload_settings()
+                        self._write(f"  · Reloaded settings. Model order: {' > '.join(order)}\n", "event")
+                        self._refresh_status()
+                        self._refresh_model_btn()
                 elif kind == "skills":
                     if not self.visible:
                         self.show(None)
@@ -408,6 +448,32 @@ class JarvisPanel:
                 self._refresh_autonomy_btn()
             state = "ON - acting without asking" if perms.autonomy() else "OFF - asking before each capability"
             self._write(f"  autonomy is {state}   (use: /autonomy on|off)\n", "event")
+        elif command == "/model":
+            if self.jarvis is None:
+                self._write("Still starting up, one moment.\n", "event")
+                return
+            parts = text.split()
+            if len(parts) == 2:
+                self._write(f"  {self.jarvis.set_model(parts[1])}\n", "event")
+                self._refresh_model_btn()
+                self._refresh_status()
+            else:
+                ms = self.jarvis.model_status()
+                self._write(f"  current: {ms['pinned']}  (auto walks: {' > '.join(ms['order'])})\n", "event")
+                for name, ok, reason, model in ms["status"]:
+                    self._write(f"    {name:<8} {'[ok] ' if ok else '[--] '}{model}  {'' if ok else reason}\n", "event")
+                self._write("  switch: /model auto|groq|gemini|ollama  (or click the header ◆ button)\n", "event")
+        elif command == "/usage":
+            from core.usage import UsageStore
+            data = UsageStore().all()
+            if not data:
+                self._write("  No model usage recorded yet.\n", "event")
+                return
+            self._write(f"  {'model':<8} {'calls':>6} {'in tok':>9} {'out tok':>9}   last used\n", "event")
+            for name in sorted(data, key=lambda n: -int(data[n].get("calls", 0))):
+                r = data[name]
+                self._write(f"  {name:<8} {int(r.get('calls', 0)):>6} {int(r.get('prompt_tokens', 0)):>9,} "
+                            f"{int(r.get('completion_tokens', 0)):>9,}   {r.get('last_used', '-')}\n", "event")
         elif command == "/teach":
             parts = text.split(maxsplit=2)
             if self.jarvis is None:
@@ -671,6 +737,9 @@ def run_daemon(show: bool = False) -> int:
             return {"ok": True}
         if command == "interrupt":
             panel.events.put(("interrupt", None))
+            return {"ok": True}
+        if command == "reloadconfig":
+            panel.events.put(("reloadconfig", None))
             return {"ok": True}
         return {"ok": False, "error": f"unknown command '{command}'"}
 
