@@ -1,26 +1,27 @@
-"""The reactor widget - JARVIS's glowing face.
+"""The reactor widget - JARVIS's glowing face, drawn entirely in code (no image assets).
 
-It plays a baked loop of frames (ui/reactor_frames/): the orbital RINGS spin, the CORE stays fixed, and
-the frames are rendered at high resolution so they stay crisp. Spin speed reacts to state (idle slow,
-busy fast, speaking medium, offline crawl). Drawing pauses while the panel is hidden. If Pillow or the
-frames are missing it falls back to a simple drawn glow so the panel never breaks.
+At startup a background thread renders a loop of frames with ui/reactor_render.py: a STATIC mesh sphere
+and white-hot core, and bold RINGS that actually orbit in 3D. The frames live in memory (never saved as
+images); the widget resizes them to fit and cycles them. Spin speed reacts to state. Until the frames are
+ready (or if Pillow/numpy are missing) it shows a simple drawn glow so the panel never blocks or breaks.
 """
 from __future__ import annotations
 
 import math
+import threading
 import tkinter as tk
-from pathlib import Path
 
 try:
-    from PIL import Image, ImageTk
-    _PIL = True
+    from PIL import ImageTk
+    from . import reactor_render
+    _OK = True
 except Exception:  # pragma: no cover
-    _PIL = False
+    _OK = False
 
 _BG = "#05070d"
-_FRAMES_DIR = Path(__file__).with_name("reactor_frames")
+_BASE = 560          # frames are rendered once at this size, then resized to fit
+_NFRAMES = 24
 
-# spin speed = frames advanced per tick (higher = faster). No per-frame work, just cycling cached frames.
 STATES = {
     "offline":  {"step": 1},
     "idle":     {"step": 1},
@@ -39,16 +40,13 @@ class ArcReactor(tk.Canvas):
         self._img_id = None
         self._phase = 0.0
 
-        self._sources: list = []          # full-size PIL frames
-        if _PIL and _FRAMES_DIR.is_dir():
-            for path in sorted(_FRAMES_DIR.glob("frame_*.png")):
-                try:
-                    self._sources.append(Image.open(path).convert("RGB"))
-                except Exception:
-                    pass
-        self._photos: list = []           # frames resized for the current widget size
+        self._pil_frames: list = []       # code-rendered frames (PIL), filled by the worker thread
+        self._ready = False
+        self._photos: list = []           # resized-to-fit PhotoImages for the current size
         self._photo_size = None
 
+        if _OK:
+            threading.Thread(target=self._render_all, name="reactor-render", daemon=True).start()
         self.after(60, self._tick)
 
     def set_state(self, name: str) -> None:
@@ -58,13 +56,25 @@ class ArcReactor(tk.Canvas):
     def set_visible(self, visible: bool) -> None:
         self._visible = bool(visible)
 
+    # ---- code rendering (worker thread) -------------------------------------------------------
+
+    def _render_all(self) -> None:
+        frames = []
+        for k in range(_NFRAMES):
+            try:
+                frames.append(reactor_render.render(_BASE, 360.0 * k / _NFRAMES))
+            except Exception:
+                return
+        self._pil_frames = frames
+        self._ready = True
+
     # ---- animation ----------------------------------------------------------------------------
 
     def _tick(self) -> None:
         showing = self._visible and self.winfo_viewable()
         if showing:
             try:
-                if self._sources:
+                if self._ready:
                     self._show_frame()
                 else:
                     self._draw_fallback()
@@ -76,16 +86,17 @@ class ArcReactor(tk.Canvas):
 
     def _fit_size(self) -> int:
         w, h = self.winfo_width(), self.winfo_height()
-        return max(0, min(min(w, h), 560))
+        return max(0, min(min(w, h), 620))
 
     def _show_frame(self) -> None:
         size = self._fit_size()
         if size < 40:
             return
         if size != self._photo_size:
-            self._photos = [ImageTk.PhotoImage(f.resize((size, size), Image.LANCZOS)) for f in self._sources]
+            self._photos = [ImageTk.PhotoImage(f.resize((size, size))) for f in self._pil_frames]
             self._photo_size = size
-            self._index = min(self._index, len(self._photos) - 1)
+        if not self._photos:
+            return
         cx, cy = self.winfo_width() / 2, self.winfo_height() / 2
         img = self._photos[int(self._index) % len(self._photos)]
         if self._img_id is None:
@@ -94,10 +105,11 @@ class ArcReactor(tk.Canvas):
             self.itemconfig(self._img_id, image=img)
             self.coords(self._img_id, cx, cy)
 
-    # ---- fallback (no Pillow / no frames) ------------------------------------------------------
+    # ---- fallback (rendering not ready / no libs) ----------------------------------------------
 
     def _draw_fallback(self) -> None:
         self.delete("all")
+        self._img_id = None
         w, h = self.winfo_width(), self.winfo_height()
         cx, cy, radius = w / 2, h / 2, min(w, h) / 2 - 8
         if radius < 20:
@@ -106,7 +118,7 @@ class ArcReactor(tk.Canvas):
         pulse = math.sin(self._phase) * 0.5 + 0.5
         for i in range(16):
             t = i / 16
-            rad = radius * (0.9 - 0.8 * t)
-            shade = int(30 + 200 * t * (0.6 + 0.4 * pulse))
+            rad = radius * (0.5 - 0.45 * t)
+            shade = int(40 + 200 * t * (0.6 + 0.4 * pulse))
             self.create_oval(cx - rad, cy - rad, cx + rad, cy + rad,
-                             fill=f"#{shade//4:02x}{shade//2:02x}{min(255, shade):02x}", outline="")
+                             fill=f"#{shade//5:02x}{shade//2:02x}{min(255, shade):02x}", outline="")
