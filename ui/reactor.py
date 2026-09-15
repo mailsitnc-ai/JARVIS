@@ -1,13 +1,14 @@
-"""An animated arc-reactor widget (Tk canvas) - JARVIS's glowing "face".
+"""An animated energy-sphere reactor widget (Tk canvas) - JARVIS's glowing "face".
 
-Pure Tkinter: the glow is faked with stacked concentric ovals stepping through a colour gradient
-(Tk has no alpha or blur), the coil ring rotates, and the core pulses. It reacts to state:
-idle breathes slowly, busy spins up and brightens, speaking pulses hard, error goes red. Drawing
-pauses while the panel is hidden so it costs no CPU in the background.
+Pure Tkinter (no alpha/blur): a bright multi-layer core, a spray of radiating plasma rays, and a
+rotating wireframe sphere of glowing lines whose front arcs are brighter than the back. It reacts to
+state: idle breathes, busy spins up and brightens, speaking pulses hard, error goes red. Drawing pauses
+while the panel is hidden so it costs no CPU in the background. The whole palette is electric blue.
 """
 from __future__ import annotations
 
 import math
+import random
 import tkinter as tk
 
 _BG = (5, 7, 13)  # deep space, matches the panel background
@@ -23,17 +24,27 @@ def _hex(color) -> str:
 
 
 def _mix(a, b, t: float):
+    t = 0.0 if t < 0 else 1.0 if t > 1 else t
     return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
 
 
-# core colour, glow colour, spin speed (deg/frame), pulse depth, phase speed
+# core colour, glow colour, ray colour, spin speed (deg/frame), pulse depth, phase speed
 STATES = {
-    "offline":  {"core": _rgb("#9fb3c8"), "glow": _rgb("#243447"), "spin": 0.15, "pulse": 0.12, "speed": 0.04},
-    "idle":     {"core": _rgb("#eaffff"), "glow": _rgb("#1e90ff"), "spin": 0.5,  "pulse": 0.35, "speed": 0.06},
-    "busy":     {"core": _rgb("#ffffff"), "glow": _rgb("#38bdf8"), "spin": 3.4,  "pulse": 0.55, "speed": 0.17},
-    "speaking": {"core": _rgb("#eaffff"), "glow": _rgb("#3ef0ff"), "spin": 1.3,  "pulse": 0.95, "speed": 0.24},
-    "error":    {"core": _rgb("#ffe0e0"), "glow": _rgb("#ff3b3b"), "spin": 0.8,  "pulse": 0.5,  "speed": 0.11},
+    "offline":  {"core": _rgb("#cfe0f0"), "glow": _rgb("#1b3a5c"), "ray": _rgb("#2d5f8f"), "spin": 0.12, "pulse": 0.10, "speed": 0.04},
+    "idle":     {"core": _rgb("#eaffff"), "glow": _rgb("#1e90ff"), "ray": _rgb("#38bdf8"), "spin": 0.45, "pulse": 0.35, "speed": 0.06},
+    "busy":     {"core": _rgb("#ffffff"), "glow": _rgb("#33aaff"), "ray": _rgb("#7fdbff"), "spin": 2.6,  "pulse": 0.55, "speed": 0.16},
+    "speaking": {"core": _rgb("#f0ffff"), "glow": _rgb("#3ef0ff"), "ray": _rgb("#9becff"), "spin": 1.2,  "pulse": 0.95, "speed": 0.24},
+    "error":    {"core": _rgb("#ffe0e0"), "glow": _rgb("#ff3b3b"), "ray": _rgb("#ff7a7a"), "spin": 0.8,  "pulse": 0.5,  "speed": 0.11},
 }
+
+
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def _norm(v):
+    m = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) or 1.0
+    return (v[0] / m, v[1] / m, v[2] / m)
 
 
 class ArcReactor(tk.Canvas):
@@ -43,6 +54,22 @@ class ArcReactor(tk.Canvas):
         self.phase = 0.0
         self.spin = 0.0
         self._visible = True
+
+        rng = random.Random(7)  # fixed seed: the field looks organic but is stable across redraws
+        # radiating plasma rays: (angle deg, inner radius frac, outer frac, twinkle phase, width)
+        self._rays = [(rng.uniform(0, 360), rng.uniform(0.10, 0.26), rng.uniform(0.55, 1.18),
+                       rng.uniform(0, 6.28), rng.choice([1, 1, 1, 2])) for _ in range(110)]
+        # sparks floating in the field: (angle, radius frac, twinkle phase)
+        self._sparks = [(rng.uniform(0, 360), rng.uniform(0.5, 1.15), rng.uniform(0, 6.28)) for _ in range(46)]
+        # great circles of the wireframe sphere, as orthonormal basis pairs (u, v) spanning each plane
+        self._circles = []
+        for n in [(0, 1, 0), (1, 0, 0), (0, 0, 1), (1, 1, 0), (1, 0, 1.2), (0.6, 1, 0.6)]:
+            n = _norm(n)
+            aux = (0, 0, 1) if abs(n[2]) < 0.9 else (0, 1, 0)
+            u = _norm(_cross(n, aux))
+            v = _cross(n, u)
+            self._circles.append((u, v))
+
         self.bind("<Configure>", lambda _e: self._draw())
         self.after(60, self._tick)
 
@@ -70,6 +97,15 @@ class ArcReactor(tk.Canvas):
     def _oval(self, cx, cy, r, **kwargs) -> None:
         self.create_oval(cx - r, cy - r, cx + r, cy + r, **kwargs)
 
+    @staticmethod
+    def _rotate(p, yaw, tilt):
+        x, y, z = p
+        ca, sa = math.cos(yaw), math.sin(yaw)          # spin about the vertical axis
+        x, z = x * ca + z * sa, -x * sa + z * ca
+        cb, sb = math.cos(tilt), math.sin(tilt)        # fixed lean, so it reads as 3D
+        y, z = y * cb - z * sb, y * sb + z * cb
+        return x, y, z
+
     def _draw(self) -> None:
         self.delete("all")
         w, h = self.winfo_width(), self.winfo_height()
@@ -77,43 +113,67 @@ class ArcReactor(tk.Canvas):
         if radius < 24:
             return
         style = STATES[self.state_name]
-        glow, core = style["glow"], style["core"]
+        glow, core, ray = style["glow"], style["core"], style["ray"]
         pulse = (math.sin(self.phase) * 0.5 + 0.5) * style["pulse"]  # 0 .. pulse
+        yaw = math.radians(self.spin)
+        tilt = math.radians(22)
 
-        # outer halo: dark at the rim, glowing toward the ring
-        halo_steps = 18
-        for i in range(halo_steps):
-            t = i / halo_steps
-            rad = radius * (1.4 - 0.55 * t)
-            self._oval(cx, cy, rad, fill=_hex(_mix(_BG, glow, (t ** 2) * (0.45 + 0.55 * pulse))), outline="")
+        # 1. deep background halo, brightest toward the centre
+        for i in range(16):
+            t = i / 16
+            self._oval(cx, cy, radius * (1.5 - 0.6 * t),
+                       fill=_hex(_mix(_BG, glow, (t ** 2.2) * (0.30 + 0.5 * pulse))), outline="")
 
-        # metallic housing rings
-        self._oval(cx, cy, radius * 0.92, outline=_hex(_mix(glow, (255, 255, 255), 0.25)), width=2)
-        self._oval(cx, cy, radius * 0.80, outline=_hex(_mix(_BG, glow, 0.55)), width=1)
+        # 2. radiating plasma rays (the particle spray)
+        base_spin = self.spin * 0.25
+        for ang, inner, outer, tw, wdt in self._rays:
+            a = math.radians(ang + base_spin)
+            twinkle = 0.35 + 0.65 * abs(math.sin(self.phase * 1.3 + tw))
+            out = outer * (1 + 0.10 * pulse)
+            x0, y0 = cx + math.cos(a) * radius * inner, cy + math.sin(a) * radius * inner
+            x1, y1 = cx + math.cos(a) * radius * out, cy + math.sin(a) * radius * out
+            col = _mix(_mix(ray, core, 0.25), glow, 0.35)
+            self.create_line(x0, y0, x1, y1, fill=_hex(_mix(_BG, col, 0.25 + 0.75 * twinkle)), width=wdt)
 
-        # rotating coil ring (the ten segments of the movie reactor)
-        segments, seg_r = 10, radius * 0.60
-        coil_col = _hex(_mix(glow, core, 0.3 + 0.35 * pulse))
-        coil_w = max(2, radius * 0.055)
-        for k in range(segments):
-            self.create_arc(cx - seg_r, cy - seg_r, cx + seg_r, cy + seg_r,
-                            start=(self.spin + k * (360 / segments) + 4) % 360, extent=26,
-                            style="arc", outline=coil_col, width=coil_w)
+        # 3. rotating wireframe sphere: great circles, front arcs brighter than the back
+        rs = radius * 0.92
+        seg = 30
+        for u, v in self._circles:
+            pts = []
+            for k in range(seg + 1):
+                t = 2 * math.pi * k / seg
+                p = (u[0] * math.cos(t) + v[0] * math.sin(t),
+                     u[1] * math.cos(t) + v[1] * math.sin(t),
+                     u[2] * math.cos(t) + v[2] * math.sin(t))
+                pts.append(self._rotate(p, yaw, tilt))
+            for k in range(seg):
+                (x0, y0, z0), (x1, y1, z1) = pts[k], pts[k + 1]
+                front = ((z0 + z1) * 0.5 + 1) * 0.5  # 0 (back) .. 1 (front)
+                bright = 0.12 + 0.85 * (front ** 1.5) * (0.7 + 0.5 * pulse)
+                self.create_line(cx + x0 * rs, cy - y0 * rs, cx + x1 * rs, cy - y1 * rs,
+                                 fill=_hex(_mix(_BG, _mix(glow, ray, front), bright)),
+                                 width=2 if front > 0.72 else 1)
 
-        # inner glow building to the core
-        core_steps = 14
-        for i in range(core_steps):
-            t = i / core_steps
-            rad = radius * 0.44 * (1 - t) + 2
-            self._oval(cx, cy, rad, fill=_hex(_mix(glow, core, t * (0.65 + 0.35 * pulse))), outline="")
+        # 4. a bright equatorial halo ring accent
+        self._oval(cx, cy, rs, outline=_hex(_mix(glow, core, 0.2 + 0.3 * pulse)), width=1)
+        self._oval(cx, cy, radius * 0.5, outline=_hex(_mix(_BG, ray, 0.5)), width=1)
 
-        # bright pulsing core
-        self._oval(cx, cy, radius * 0.14 * (1 + 0.28 * pulse), fill=_hex(core), outline="")
+        # 5. sparks in the field
+        for ang, rf, tw in self._sparks:
+            a = math.radians(ang - base_spin)
+            tw_b = abs(math.sin(self.phase * 1.7 + tw))
+            if tw_b < 0.4:
+                continue
+            x, y = cx + math.cos(a) * radius * rf, cy + math.sin(a) * radius * rf
+            s = 1 + 1.4 * tw_b
+            self._oval(x, y, s, fill=_hex(_mix(glow, core, tw_b)), outline="")
 
-        # faint triangle motif, slowly counter-rotating
-        tri_r = tri = radius * 0.34
-        points = []
-        for k in range(3):
-            a = math.radians(-90 + k * 120 - self.spin * 0.35)
-            points += [cx + tri * math.cos(a), cy + tri * math.sin(a)]
-        self.create_polygon(points, outline=_hex(_mix(glow, core, 0.45)), fill="", width=1)
+        # 6. inner glow building to the core
+        for i in range(16):
+            t = i / 16
+            self._oval(cx, cy, radius * 0.40 * (1 - t) + 2, fill=_hex(_mix(glow, core, t * (0.6 + 0.4 * pulse))),
+                       outline="")
+
+        # 7. bright pulsing core with a white-hot centre
+        self._oval(cx, cy, radius * 0.17 * (1 + 0.26 * pulse), fill=_hex(_mix(glow, core, 0.85)), outline="")
+        self._oval(cx, cy, radius * 0.09 * (1 + 0.30 * pulse), fill=_hex(core), outline="")
