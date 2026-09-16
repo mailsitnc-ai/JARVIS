@@ -110,6 +110,8 @@ class Jarvis:
         self._self_editor = SelfEditor(self.llm, ROOT, emit=self._emit, archive_dir=archive_dir,
                                        run_tests=bool(self.settings.get("self_edit.run_tests", True)),
                                        git_commit=bool(self.settings.get("self_edit.git_commit", True)))
+        from .agenda import AgendaStore
+        self.agenda = AgendaStore()    # JARVIS's own to-do list, worked by the daemon's scheduler
         self._lock = threading.Lock()          # serializes the quick decision phase
         self._evolve_lock = threading.Lock()   # one background build at a time
 
@@ -627,6 +629,48 @@ class Jarvis:
         pinned = str(self.settings.get("llm.provider", "auto") or "auto").lower()
         nxt = next((n for n, ok, _r, _m in self.llm.status() if ok), None)
         return {"pinned": pinned, "order": self.llm.order(), "next": nxt, "status": self.llm.status()}
+
+    # ---- autonomous initiative (the daemon scheduler calls these) ------------------------------
+
+    def run_agenda_task(self, task: dict) -> str:
+        """Carry out one scheduled task on JARVIS's own initiative. Returns a short result line."""
+        if task.get("kind") == "reflection":
+            return self.reflect()
+        prompt = str(task.get("prompt", "")).strip()
+        if not prompt:
+            return "empty task"
+        self._emit("agenda", f"Working scheduled task: {task.get('title', prompt)}")
+        reply = self.handle(prompt)
+        return reply.text
+
+    def reflect(self) -> str:
+        """Self-review: find the evolved skill that fails most and improve it - evolution driven by JARVIS
+        itself, not a user command. Safe (improve is sandbox-verified and rolls back)."""
+        self._emit("reflect", "Reflecting on my own performance...")
+        evolved = {s.name for s in self.registry.skills.values() if getattr(s, "origin", "") == "evolved"}
+        if not evolved:
+            return "Reflection: no evolved skills yet - nothing to improve."
+        try:
+            lessons = self.learning.recent_lessons(limit=40, kinds=("skill_crashed", "build_failed"))
+        except Exception:
+            lessons = []
+        tally: dict[str, int] = {}
+        for text in lessons:
+            m = re.search(r"'([^']+)'", str(text))
+            if m and m.group(1) in evolved:
+                tally[m.group(1)] = tally.get(m.group(1), 0) + 1
+        if not tally:
+            return f"Reflection: {len(evolved)} evolved skill(s), no recent failures - all healthy."
+        worst = max(tally, key=tally.get)
+        skill = self.registry.get(worst)
+        if skill is None:
+            return "Reflection: nothing actionable."
+        self._emit("reflect", f"'{worst}' failed {tally[worst]}x recently - improving it.")
+        outcome = self.evolution.improve(skill, reason=f"Recurring failures ({tally[worst]} recently); make it robust.")
+        if outcome.kind == "skill":
+            self.learning.add_lesson("reflected", f"Auto-improved '{worst}' after {tally[worst]} failures", worst)
+            return f"Reflection: auto-improved '{worst}' (had {tally[worst]} recent failures)."
+        return f"Reflection: tried to improve '{worst}' but couldn't ({outcome.detail or 'no better version'})."
 
     @staticmethod
     def _coerce_setting(setting: str, value):

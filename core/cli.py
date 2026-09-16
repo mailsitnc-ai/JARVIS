@@ -272,6 +272,93 @@ def cmd_model(args) -> int:
     return 0
 
 
+def _parse_duration(text: str) -> int | None:
+    import re as _re
+    m = _re.fullmatch(r"(\d+)\s*([smhd])", str(text).strip().lower())
+    if not m:
+        return None
+    return int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+
+
+def cmd_agenda(args) -> int:
+    """JARVIS's own to-do list - scheduled tasks it runs on its own initiative (while autonomy is on)."""
+    from .agenda import AgendaStore, describe_trigger
+
+    store = AgendaStore()
+    action = (args.action or "list").lower()
+
+    if action in ("on", "off"):
+        store.set_enabled(action == "on")
+        print(f"Agenda scheduler {'enabled' if action == 'on' else 'disabled'}.")
+        return 0
+    if action == "reflect":
+        mode = (args.rest[0].lower() if args.rest else "on")
+        existing = [t for t in store.list() if t["kind"] == "reflection"]
+        if mode == "off":
+            for t in existing:
+                store.remove(t["id"])
+            print("Self-reflection task removed.")
+        else:
+            if existing:
+                store.set_task_enabled(existing[0]["id"], True)
+            else:
+                store.add("Self-reflection", "__reflect__", {"type": "interval", "seconds": 6 * 3600}, kind="reflection")
+            print("Self-reflection scheduled every 6h (runs only while autonomy is on).")
+        return 0
+    if action == "add":
+        prompt = " ".join(args.rest).strip()
+        if not prompt:
+            print('What should it do? e.g. jarvis agenda add "organize my downloads" --every 1h')
+            return 1
+        if args.once:
+            at = args.once.strip()
+            if len(at) == 16:      # 'YYYY-MM-DD HH:MM' -> add seconds
+                at += ":00"
+            trigger = {"type": "once", "at": at}
+        elif args.daily:
+            trigger = {"type": "daily", "time": args.daily}
+        else:
+            secs = _parse_duration(args.every or "1h")
+            if secs is None:
+                print("Use --every like 30m/2h/1d, or --daily 08:00, or --once 'YYYY-MM-DD HH:MM'.")
+                return 1
+            trigger = {"type": "interval", "seconds": secs}
+        task = store.add(args.title or prompt[:40], prompt, trigger)
+        print(f"Added task {task['id']}: {task['title']} ({describe_trigger(trigger)}). Runs while autonomy is on.")
+        return 0
+    if action == "remove":
+        if not args.rest:
+            print("Usage: jarvis agenda remove <id>")
+            return 1
+        print("Removed." if store.remove(args.rest[0]) else "No task with that id.")
+        return 0
+    if action == "run":
+        if not args.rest:
+            print("Usage: jarvis agenda run <id>")
+            return 1
+        from .orchestrator import Jarvis
+        task = store.get(args.rest[0])
+        if task is None:
+            print("No task with that id.")
+            return 1
+        jarvis = Jarvis(on_event=_print_event, confirm=_terminal_confirm)
+        print(jarvis.run_agenda_task(task))
+        store.mark_ran(task["id"], "ran manually")
+        return 0
+
+    # default: list
+    tasks = store.list()
+    print(f"Agenda scheduler: {'ON' if store.enabled() else 'OFF'}   (tasks run only while autonomy is on)\n")
+    if not tasks:
+        print('  (empty)   add one:  jarvis agenda add "summarize my day" --daily 18:00')
+        return 0
+    for t in tasks:
+        flag = " " if t.get("enabled") else "×"
+        print(f"  [{flag}] {t['id']}  {t['title'][:34]:<34} {describe_trigger(t['trigger']):<16} "
+              f"next {t.get('next_run', '-')}  runs {t.get('runs', 0)}")
+    return 0
+
+
 def cmd_improve(args) -> int:
     """Ask JARVIS to rewrite one of its own evolved skills to be better."""
     from .orchestrator import Jarvis
@@ -639,6 +726,16 @@ def build_parser() -> argparse.ArgumentParser:
     model = sub.add_parser("model", help="show or switch which model JARVIS uses")
     model.add_argument("name", nargs="?", help="auto | groq | gemini | ollama")
     model.set_defaults(func=cmd_model)
+
+    agenda = sub.add_parser("agenda", help="JARVIS's scheduled tasks it runs on its own (list/add/remove/run/on/off/reflect)")
+    agenda.add_argument("action", nargs="?", default="list",
+                        help="list | add | remove | run | on | off | reflect")
+    agenda.add_argument("rest", nargs="*", help="the task text (for add), or an id (remove/run)")
+    agenda.add_argument("--every", help="interval like 30m, 2h, 1d")
+    agenda.add_argument("--daily", help="time of day like 08:00")
+    agenda.add_argument("--once", help="a single time: 'YYYY-MM-DD HH:MM'")
+    agenda.add_argument("--title", help="a short name for the task")
+    agenda.set_defaults(func=cmd_agenda)
 
     improve = sub.add_parser("improve", help="have JARVIS rewrite one of its own evolved skills")
     improve.add_argument("skill")

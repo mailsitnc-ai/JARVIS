@@ -36,6 +36,7 @@ HELP = """Commands
   /permissions  what JARVIS may do    /teach <skill> <phrase>   bind a phrasing to a skill
   /autonomy on|off  unleash / re-gate /lessons  what JARVIS learned
   /model [name]  show/switch the model  /usage    model usage per model
+  /agenda       scheduled tasks JARVIS runs on its own (manage from: jarvis agenda)
   /clear        clear this panel (or Ctrl+Shift+R)    /hide  hide JARVIS (or Esc)
 Anything else is a request. If no skill can handle it, JARVIS builds one.
 By default actions on your PC ask for approval. Turn on autonomy (🔥 header button) to let it act freely.
@@ -312,6 +313,9 @@ class JarvisPanel:
                         self._write("  · Interrupting - stopping at the next step...\n", "event")
                     elif self.jarvis is not None:
                         self._write("  · Nothing running to interrupt.\n", "event")
+                elif kind == "agenda_done":
+                    title, result = payload
+                    self._write(f"  ⏱ {title}: {result}\n", "event")
                 elif kind == "reloadconfig":
                     if self.jarvis is not None:
                         order = self.jarvis.reload_settings()
@@ -463,6 +467,18 @@ class JarvisPanel:
                 for name, ok, reason, model in ms["status"]:
                     self._write(f"    {name:<8} {'[ok] ' if ok else '[--] '}{model}  {'' if ok else reason}\n", "event")
                 self._write("  switch: /model auto|groq|gemini|ollama  (or click the header ◆ button)\n", "event")
+        elif command == "/agenda":
+            from core.agenda import AgendaStore, describe_trigger
+            store = AgendaStore()
+            tasks = store.list()
+            self._write(f"  agenda scheduler: {'ON' if store.enabled() else 'OFF'} "
+                        f"(runs only while autonomy is on)\n", "event")
+            if not tasks:
+                self._write("  (empty)  add from a terminal: jarvis agenda add \"...\" --every 1h\n", "event")
+            for t in tasks:
+                flag = " " if t.get("enabled") else "×"
+                self._write(f"  [{flag}] {t['id']} {t['title'][:30]:<30} {describe_trigger(t['trigger'])}"
+                            f"  next {t.get('next_run', '-')}\n", "event")
         elif command == "/usage":
             from core.usage import UsageStore
             data = UsageStore().all()
@@ -742,6 +758,32 @@ def run_daemon(show: bool = False) -> int:
             panel.events.put(("reloadconfig", None))
             return {"ok": True}
         return {"ok": False, "error": f"unknown command '{command}'"}
+
+    def agenda_loop():
+        """Work JARVIS's own to-do list on schedule - but only while autonomy is on (unattended action
+        can't stop to ask), so this is safe by default and stops the moment you re-gate."""
+        import time as _time
+        while True:
+            _time.sleep(20)
+            jarvis = panel.jarvis
+            if jarvis is None:
+                continue
+            try:
+                if not jarvis.agenda.enabled():
+                    continue
+                if not (jarvis.permissions and jarvis.permissions.autonomy()):
+                    continue  # gated: hold scheduled tasks until you unleash it
+                for task in jarvis.agenda.due():
+                    try:
+                        result = jarvis.run_agenda_task(task)
+                    except Exception as exc:
+                        result = f"error: {exc}"
+                    jarvis.agenda.mark_ran(task["id"], result)
+                    panel.events.put(("agenda_done", (task.get("title", "task"), result)))
+            except Exception:
+                pass
+
+    threading.Thread(target=agenda_loop, name="jarvis-agenda", daemon=True).start()
 
     server = ControlServer(on_command, int(settings.get("window.ipc_port", 47821)))
     server.start()
