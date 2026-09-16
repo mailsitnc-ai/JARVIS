@@ -66,6 +66,9 @@ DEFAULTS: dict[str, Any] = {
     "window": {
         "hotkey": "ctrl+alt+j",
         "interrupt_hotkey": "ctrl+alt+c",  # stop whatever JARVIS is currently doing
+        # Which browser to open links/searches/tabs in: "chrome" reuses your Chrome window;
+        # "default" uses the OS default; also "edge"/"firefox"/"brave" or a full path to the .exe.
+        "browser": "chrome",
         "split": 0.6,  # share of the screen kept by the window you were working in
         "jarvis_side": "right",
         "ipc_port": 47821,

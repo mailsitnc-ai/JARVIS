@@ -705,7 +705,7 @@ class Jarvis:
         except OSError:
             recalled = []
         broker = ActionBroker(dry_run=False, permissions=self.permissions, confirm=self.confirm, emit=self._emit,
-                              state_dir=self._state_dir)
+                              state_dir=self._state_dir, browser=self.settings.get("window.browser", "chrome"))
         return {"dry_run": False, "llm": ask_llm, "memory": recalled, "platform": "windows",
                 "emit": self._emit, "root": str(ROOT), "actions": broker, "permissions": self.permissions,
                 "run": lambda sub: self._subrun(sub, depth), "skills": sorted(self.registry.skills)}

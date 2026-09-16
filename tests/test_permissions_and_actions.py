@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest import mock
 
@@ -93,6 +94,23 @@ class ActionBrokerLiveTests(IsolatedCase):
         self.assertEqual(broker.last_written(), target)  # remembered for "open it"
         # a fresh broker (new request) still sees it, via the state file
         self.assertEqual(ActionBroker(permissions=perms, state_dir=self.tmp).last_written(), target)
+
+    def test_open_url_prefers_the_chosen_browser(self):
+        perms = PermissionRegistry(self.tmp / "p.json")
+        perms.set("open", "allow")
+        broker = ActionBroker(permissions=perms, browser="chrome")
+        with mock.patch("core.actions.shutil.which", return_value=r"C:\chrome.exe"), \
+                mock.patch("core.actions.subprocess.Popen") as popen, \
+                mock.patch("core.actions.webbrowser.open") as wb:
+            broker.open_url("example.com")
+            popen.assert_called_once()
+            self.assertEqual(popen.call_args[0][0], [r"C:\chrome.exe", "https://example.com"])
+            wb.assert_not_called()   # went to Chrome, not the OS default
+        # default/None falls back to the OS default browser
+        default = ActionBroker(permissions=perms, browser="default")
+        with mock.patch("core.actions.webbrowser.open") as wb2:
+            default.open_url("example.com")
+            wb2.assert_called_once()
 
     def test_run_python_launches_the_interpreter(self):
         perms = PermissionRegistry(self.tmp / "p.json")
@@ -238,6 +256,7 @@ class OrchestratorGatingTests(IsolatedCase):
         self.assertIn("didn't approve", reply.text)
 
     def test_approved_action_runs(self):
+        os.environ["JARVIS_WINDOW__BROWSER"] = "default"  # use the OS default so webbrowser.open is the path
         jarvis = self.make(confirm=lambda req: "once")
         with mock.patch("core.actions.webbrowser.open") as browser:
             reply = jarvis.handle("ping")

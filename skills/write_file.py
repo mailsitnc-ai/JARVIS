@@ -13,7 +13,9 @@ SKILL = {
                     "'write a python snake game and save it as snake.py' or 'create an html landing page'."),
     "triggers": [
         r"\b(?:write|create|make|build|generate|code)\b[^.]*\b(?:script|program|app|application|game|"
-        r"webpage|web\s*page|website|page|file|module|class|function|snippet|code)\b",
+        r"webpage|web\s*page|website|page|file|module|class|function|snippet|code|document|doc|note|"
+        r"report|essay|paper|letter|story|readme|markdown|list)\b",
+        r"\b(?:write|create|make|generate|save)\b[^.]*\btitled\b",
         r"\bsave\b[^.]*\b(?:as|to|in)\b[^.]*\.\w{1,5}\b",
     ],
     "version": 1,
@@ -46,6 +48,12 @@ def _target_path(request):
         m = re.search(r"\b(?:as|named|called)\s+[\"']?([\w .\-]{1,40}?)[\"']?(?:\s|$)", request, re.IGNORECASE)
         if m:
             name = m.group(1).strip()
+    if not name:   # "a document titled RESEARCH PAPER" -> RESEARCH PAPER.txt
+        tm = re.search(r"\btitled?\s+[\"']?(.+?)[\"']?(?:\s+(?:with|and|to|in|containing|that|of|for)\b|[.,]|$)",
+                       request, re.IGNORECASE)
+        if tm:
+            title = tm.group(1).strip()
+            name = title if re.search(r"\.\w{1,5}$", title) else f"{title}.txt"
 
     # An explicit folder ("to/in my desktop", "in downloads") or a full path after to/in.
     folder = Path.home() / "Desktop"

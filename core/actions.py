@@ -189,13 +189,15 @@ def _normalize_decision(value) -> str:
 
 
 class ActionBroker:
-    def __init__(self, *, dry_run=False, permissions=None, confirm=None, emit=None, pictures_dir=None, state_dir=None):
+    def __init__(self, *, dry_run=False, permissions=None, confirm=None, emit=None, pictures_dir=None,
+                 state_dir=None, browser=None):
         self.dry_run = dry_run
         self.permissions = permissions
         self.confirm = confirm           # callable(ActionRequest) -> "once" | "always" | "deny" | bool
         self.emit = emit                 # callable(stage, message) for progress lines
         self.pictures_dir = Path(pictures_dir) if pictures_dir else (Path.home() / "Pictures")
         self.state_dir = Path(state_dir) if state_dir else None  # where "last screenshot" is remembered
+        self.browser = browser           # which browser to open URLs in ("chrome"/"edge"/path/None=OS default)
         self.performed: list[ActionRequest] = []
         self.simulated: list[ActionRequest] = []
         self.blocked: list[ActionRequest] = []
@@ -311,14 +313,37 @@ class ActionBroker:
             f"Would open {label}.",
         )
 
+    def _browser_exe(self) -> str | None:
+        """The executable for the preferred browser, so URLs open there (and reuse its window) instead of
+        the OS default. None -> use the OS default (webbrowser)."""
+        pref = str(self.browser or "").strip().lower()
+        if pref in ("", "default", "system"):
+            return None
+        if pref.endswith(".exe") or "\\" in pref or "/" in pref:   # an explicit path
+            return pref if Path(pref).exists() else None
+        key = {"chrome": "chrome", "google chrome": "chrome", "edge": "msedge", "msedge": "msedge",
+               "microsoft edge": "msedge", "firefox": "firefox", "brave": "brave"}.get(pref, pref)
+        return shutil.which(f"{key}.exe") or shutil.which(key) or self._app_paths_exe(key)
+
     def open_url(self, url: str):
         url = url.strip()
         if not _URL.fullmatch(url):
             return f"That doesn't look like a web address: {url!r}"
         full = url if url.lower().startswith("http") else f"https://{url}"
         req = ActionRequest("open", f"Open {full} in your browser", details=full)
-        return self._gated(req, lambda: (webbrowser.open(full, new=2), f"Opening {full}")[1],
-                           f"Would open {full} in your browser.")
+
+        def do():
+            exe = self._browser_exe()
+            if exe:                       # launch the chosen browser; if it's already open, this is a new tab
+                try:
+                    subprocess.Popen([exe, full], creationflags=_NO_WINDOW, close_fds=True)
+                    return f"Opening {full}"
+                except OSError:
+                    pass
+            webbrowser.open(full, new=2)  # fall back to the OS default browser
+            return f"Opening {full}"
+
+        return self._gated(req, do, f"Would open {full} in your browser.")
 
     def open_browser(self, url: str = "https://www.google.com/?newtab"):
         """Open the default browser, in a new tab."""

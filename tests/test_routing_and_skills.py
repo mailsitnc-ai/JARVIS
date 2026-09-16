@@ -296,7 +296,7 @@ class UnderstandingTests(IsolatedCase):
         calls = []
         jarvis = self.make(FakeLLM([reading, dec1, done]), confirm=lambda req: calls.append(req) or "deny")
         jarvis.permissions.set_autonomy(True)  # unleashed
-        with mock.patch("core.actions.webbrowser.open"):
+        with mock.patch("core.actions.webbrowser.open"), mock.patch("core.actions.subprocess.Popen"):
             reply = jarvis.handle("search cats and dogs on the web")
         self.assertEqual((reply.route, reply.text), ("agent", "All done."))
         self.assertEqual(calls, [])  # no plan approval, no per-action prompt
