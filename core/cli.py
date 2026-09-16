@@ -396,6 +396,14 @@ def cmd_edit_self(args) -> int:
 
 # ---- configuration -------------------------------------------------------------------------------
 
+def _fingerprint(value: str, keep: int = 7) -> str:
+    """Show enough of a secret to spot a bad paste, without printing the whole thing."""
+    n = len(value)
+    if n <= keep + 4:
+        return f"{n} chars (too short to mask safely)"
+    return f"{n} chars, starts '{value[:keep]}', ends '{value[-3:]}'"
+
+
 def cmd_google(args) -> int:
     from .google import GoogleAuth
 
@@ -415,12 +423,24 @@ def cmd_google(args) -> int:
         print("  4. Credentials > Create credentials > OAuth client ID > application type 'Desktop app'")
         print("  5. Paste the Client ID and Client secret below.\n")
         client_id = input("Client ID: ").strip()
-        client_secret = getpass.getpass("Client secret (hidden): ").strip()
+        if getattr(args, "show", False):
+            client_secret = input("Client secret (visible): ").strip()
+        else:
+            client_secret = getpass.getpass("Client secret (hidden): ").strip()
         if not client_id or not client_secret:
             print("Nothing saved.")
             return 1
         auth.set_credentials(client_id, client_secret)
         print("Saved (encrypted). Now run:  jarvis google login")
+        print(f"  Client ID  : {_fingerprint(client_id, keep=16)}")
+        print(f"  Secret     : {_fingerprint(client_secret)}")
+        if not client_secret.startswith("GOCSPX-"):
+            print("  ! Warning: a Google client secret normally starts with 'GOCSPX-'. If yours doesn't,")
+            print("    you copied the wrong field. It's the 'Client secret' shown next to the client in")
+            print("    APIs & Services > Credentials (not the Client ID, not a downloaded JSON filename).")
+        elif len(client_secret) < 30:
+            print("  ! Warning: that secret looks short - it may have been truncated on paste. Re-run and")
+            print("    use the copy icon next to the secret, or run:  jarvis google setup --show")
         return 0
     print("Opening your browser to sign in to Google...")
     print(auth.login())
@@ -759,6 +779,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     google = sub.add_parser("google", help="connect Google Drive + Gmail (setup, login, status, logout)")
     google.add_argument("action", nargs="?", default="login", choices=["setup", "login", "status", "logout"])
+    google.add_argument("--show", action="store_true",
+                        help="with setup: type the client secret visibly so you can verify the paste")
     google.set_defaults(func=cmd_google)
     return parser
 
