@@ -94,6 +94,18 @@ class ActionBrokerLiveTests(IsolatedCase):
         # a fresh broker (new request) still sees it, via the state file
         self.assertEqual(ActionBroker(permissions=perms, state_dir=self.tmp).last_written(), target)
 
+    def test_run_python_launches_the_interpreter(self):
+        perms = PermissionRegistry(self.tmp / "p.json")
+        perms.set("run_command", "allow")
+        f = self.tmp / "app.py"
+        f.write_text("print('hi')", encoding="utf-8")
+        broker = ActionBroker(permissions=perms)
+        with mock.patch("core.actions.subprocess.Popen") as popen:
+            out = broker.run_python(str(f))
+            popen.assert_called_once()
+        self.assertIn("Running app.py", out)
+        self.assertIn("Would run", ActionBroker(dry_run=True).run_python("x.py"))
+
     def test_organize_dir_sorts_files_into_type_folders(self):
         perms = PermissionRegistry(self.tmp / "p.json")
         perms.set("write_files", "allow")

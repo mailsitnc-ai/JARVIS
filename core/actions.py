@@ -625,6 +625,32 @@ class ActionBroker:
 
     # ---- commands -----------------------------------------------------------------------------
 
+    def run_python(self, path: str) -> str:
+        """Actually RUN a Python file: a .pyw as a windowless GUI, a .py in its own console. Gated run_command."""
+        target = Path(path).expanduser()
+        req = ActionRequest("run_command", f"Run {target.name}", details=str(target))
+
+        def do():
+            if not target.is_file():
+                return f"There's nothing at {target}."
+            exe = sys.executable
+            if target.suffix.lower() == ".pyw":                     # GUI: pythonw, no console
+                pyw = Path(exe).with_name("pythonw.exe")
+                exe = str(pyw) if pyw.exists() else exe
+                flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                stdio = subprocess.DEVNULL
+            else:                                                   # script: a fresh console shows its output
+                flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                stdio = None
+            try:
+                subprocess.Popen([exe, str(target)], cwd=str(target.parent), creationflags=flags,
+                                 stdin=stdio, stdout=stdio, stderr=stdio, close_fds=True)
+            except OSError as exc:
+                return f"Couldn't run {target.name}: {exc}"
+            return f"Running {target.name}."
+
+        return self._gated(req, do, f"Would run {target.name}.")
+
     def run_command(self, args, cwd: str | None = None, timeout: float = 60) -> str:
         if isinstance(args, str):
             args = [args]

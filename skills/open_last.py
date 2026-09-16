@@ -25,4 +25,6 @@ def run(request, context):
         return "I haven't created a file yet - tell me what to open, e.g. 'open notepad'."
     if context.get("dry_run"):
         return f"Would open {path}."
+    if path.suffix.lower() in (".py", ".pyw"):   # "run it" on a script/app should execute it, not edit it
+        return actions.run_python(str(path))
     return actions.open_path(str(path))
