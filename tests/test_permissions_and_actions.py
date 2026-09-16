@@ -94,6 +94,22 @@ class ActionBrokerLiveTests(IsolatedCase):
         # a fresh broker (new request) still sees it, via the state file
         self.assertEqual(ActionBroker(permissions=perms, state_dir=self.tmp).last_written(), target)
 
+    def test_organize_dir_sorts_files_into_type_folders(self):
+        perms = PermissionRegistry(self.tmp / "p.json")
+        perms.set("write_files", "allow")
+        folder = self.tmp / "Downloads"
+        folder.mkdir()
+        for fn in ("a.png", "b.pdf", "c.mp3", "d.unknownext"):
+            (folder / fn).write_text("x", encoding="utf-8")
+        broker = ActionBroker(permissions=perms)
+        out = broker.organize_dir(str(folder))
+        self.assertIn("Organized 4", out)
+        self.assertTrue((folder / "Images" / "a.png").is_file())
+        self.assertTrue((folder / "Documents" / "b.pdf").is_file())
+        self.assertTrue((folder / "Audio" / "c.mp3").is_file())
+        self.assertTrue((folder / "Other" / "d.unknownext").is_file())
+        self.assertIn("already tidy", broker.organize_dir(str(folder)))  # second pass: nothing loose left
+
     def test_autonomy_runs_every_capability_without_asking(self):
         perms = PermissionRegistry(self.tmp / "p.json")
         perms.set_autonomy(True)

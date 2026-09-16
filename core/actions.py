@@ -125,6 +125,26 @@ LOCAL_FILE_EXT = {
 }
 
 
+# Folders that organize_dir sorts files into, keyed by extension.
+_FILE_CATEGORIES = {
+    "Images": {"png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "ico", "tiff", "heic"},
+    "Documents": {"pdf", "doc", "docx", "txt", "md", "rtf", "odt", "csv", "xls", "xlsx", "ppt", "pptx", "epub"},
+    "Videos": {"mp4", "mkv", "avi", "mov", "wmv", "flv", "webm"},
+    "Audio": {"mp3", "wav", "flac", "aac", "ogg", "m4a"},
+    "Archives": {"zip", "rar", "7z", "tar", "gz", "iso"},
+    "Installers": {"exe", "msi"},
+    "Code": {"py", "js", "ts", "html", "css", "json", "c", "cpp", "java", "sh", "ps1", "bat"},
+}
+
+
+def _category_for(suffix: str) -> str:
+    ext = str(suffix).lower().lstrip(".")
+    for name, exts in _FILE_CATEGORIES.items():
+        if ext in exts:
+            return name
+    return "Other"
+
+
 def has_local_file_ext(name: str) -> bool:
     stem = str(name).strip().strip("\"'").split("/")[-1].split("\\")[-1]
     ext = stem.rsplit(".", 1)[-1].lower() if "." in stem else ""
@@ -414,6 +434,41 @@ class ActionBroker:
             return f"Wrote {len(text)} characters to {target}."
 
         return self._gated(req, do, f"Would write {len(text)} characters to {target}.")
+
+    def organize_dir(self, path: str) -> str:
+        """Sort the loose files in a folder into subfolders by type (Images, Documents, ...). Gated by write_files."""
+        target = Path(path).expanduser()
+        req = ActionRequest("write_files", f"Organize files in {target} by type", details=str(target))
+
+        def do():
+            if not target.is_dir():
+                return f"There's no folder at {target}."
+            categories = set(_FILE_CATEGORIES) | {"Other"}
+            moved, used = 0, set()
+            for entry in list(target.iterdir()):
+                if entry.is_dir() or entry.name.startswith(".") or entry.name in categories:
+                    continue
+                if not entry.is_file():
+                    continue
+                cat = _category_for(entry.suffix)
+                dest_dir = target / cat
+                dest_dir.mkdir(exist_ok=True)
+                dest = dest_dir / entry.name
+                n = 1
+                while dest.exists():                       # never overwrite: foo.txt -> foo (2).txt
+                    dest = dest_dir / f"{entry.stem} ({n}){entry.suffix}"
+                    n += 1
+                try:
+                    shutil.move(str(entry), str(dest))
+                    moved += 1
+                    used.add(cat)
+                except OSError:
+                    continue
+            if not moved:
+                return f"Nothing to organize in {target} (already tidy)."
+            return f"Organized {moved} file(s) into {len(used)} folder(s) in {target}: {', '.join(sorted(used))}."
+
+        return self._gated(req, do, f"Would sort the files in {target} into type folders.")
 
     def _last_written_file(self) -> Path | None:
         return (self.state_dir / "last_written.txt") if self.state_dir else None
