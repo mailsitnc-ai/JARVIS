@@ -20,7 +20,9 @@ from .config import user_dir, write_json_atomic
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/gmail.readonly"]
+# gmail.modify = read + organize (labels, archive, mark read, trash). NOT gmail.send - JARVIS never sends
+# mail, and never permanently deletes (trash is reversible). Drive stays read-only.
+SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/gmail.modify"]
 
 
 class GoogleError(RuntimeError):
@@ -184,6 +186,68 @@ class GoogleClient:
             return f"No Drive files matching '{query}'."
         lines = [f"- {f.get('name', '(untitled)')}  {f.get('webViewLink', '')}".rstrip() for f in files]
         return f"Found {len(files)} in your Drive for '{query}':\n" + "\n".join(lines)
+
+    def _post(self, url: str, body: dict) -> dict:
+        token = self.auth.access_token()
+        if not token:
+            raise GoogleError("not connected to Google")
+        request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST",
+                                         headers={"Authorization": f"Bearer {token}",
+                                                  "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=25) as resp:
+                raw = resp.read().decode("utf-8")
+                return json.loads(raw) if raw.strip() else {}
+        except urllib.error.HTTPError as exc:
+            raise GoogleError(f"HTTP {exc.code}: {exc.read(300).decode('utf-8', 'replace')}") from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise GoogleError(str(getattr(exc, "reason", exc))) from exc
+
+    def _message_ids(self, query: str, limit: int = 200) -> list[str]:
+        ids: list[str] = []
+        page = None
+        while len(ids) < limit:
+            url = (f"https://gmail.googleapis.com/gmail/v1/users/me/messages?q={urllib.parse.quote(query)}"
+                   f"&maxResults={min(100, limit - len(ids))}" + (f"&pageToken={page}" if page else ""))
+            data = self._get(url)
+            ids += [m["id"] for m in data.get("messages", [])]
+            page = data.get("nextPageToken")
+            if not page:
+                break
+        return ids[:limit]
+
+    def ensure_label(self, name: str) -> str:
+        for label in self._get("https://gmail.googleapis.com/gmail/v1/users/me/labels").get("labels", []):
+            if label.get("name", "").lower() == name.lower():
+                return label["id"]
+        created = self._post("https://gmail.googleapis.com/gmail/v1/users/me/labels",
+                             {"name": name, "labelListVisibility": "labelShow", "messageListVisibility": "show"})
+        return created.get("id", "")
+
+    def _batch_modify(self, ids: list[str], add=None, remove=None) -> None:
+        for i in range(0, len(ids), 100):
+            self._post("https://gmail.googleapis.com/gmail/v1/users/me/messages/batchModify",
+                       {"ids": ids[i:i + 100], "addLabelIds": add or [], "removeLabelIds": remove or []})
+
+    def gmail_organize(self, query: str, action: str, label: str | None = None, limit: int = 300) -> str:
+        """Organize inbox mail matching a Gmail query. action: archive | read | trash | label."""
+        action = (action or "").lower()
+        ids = self._message_ids(query, limit)
+        if not ids:
+            return f"No emails matching '{query}'."
+        if action == "archive":
+            self._batch_modify(ids, remove=["INBOX"]); verb = "Archived"
+        elif action == "read":
+            self._batch_modify(ids, remove=["UNREAD"]); verb = "Marked read"
+        elif action == "trash":
+            self._batch_modify(ids, add=["TRASH"], remove=["INBOX"]); verb = "Moved to Trash"
+        elif action == "label":
+            if not label:
+                return "Tell me which label to apply."
+            self._batch_modify(ids, add=[self.ensure_label(label)]); verb = f"Labelled '{label}'"
+        else:
+            return f"Unknown Gmail action '{action}'. Use archive, read, trash or label."
+        return f"{verb}: {len(ids)} email(s) matching '{query}'."
 
     def search_gmail(self, query: str, limit: int = 5) -> str:
         listing = self._get(f"https://gmail.googleapis.com/gmail/v1/users/me/messages"

@@ -33,6 +33,8 @@ def _target(request):
 
 
 def run(request, context):
+    if re.search(r"\b(?:email|emails|inbox|gmail|mail|message|messages)\b", request, re.IGNORECASE):
+        return None   # that's a Gmail request -> let gmail_organize handle it
     target = _target(request)
     if context.get("dry_run"):
         return f"Would organize the files in {target} by type."

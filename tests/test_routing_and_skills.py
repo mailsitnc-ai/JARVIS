@@ -11,7 +11,8 @@ from tests.helpers import FakeLLM, IsolatedCase
 
 BUILTIN_SKILLS = ("temperature_converter", "current_time", "calculator", "system_status", "open_app",
                   "web_search", "screenshot", "browser_tab", "show_screenshot", "speak",
-                  "drive_search", "gmail_search", "popup", "write_file", "open_last", "organize_files")
+                  "drive_search", "gmail_search", "popup", "write_file", "open_last", "organize_files",
+                  "gmail_organize")
 
 
 class RoutingTests(IsolatedCase):
@@ -75,6 +76,19 @@ class RoutingTests(IsolatedCase):
         skill = jarvis.registry.get("popup")
         self.assertEqual(skill.run("popup saying hello there", {"dry_run": True}), 'Would show a popup: "hello there"')
         self.assertEqual(skill.run("show a popup", {"dry_run": True}), "What should the popup say?")
+
+    def test_gmail_organize_parses_action_query_and_label(self):
+        from skills.gmail_organize import run as gm
+        ctx = {"dry_run": True}
+        self.assertEqual(gm("archive emails from noreply@x.com", ctx),
+                         "Would archive emails matching 'from:noreply@x.com'.")
+        self.assertEqual(gm("mark promotions emails as read", ctx),
+                         "Would read emails matching 'category:promotions'.")
+        self.assertEqual(gm("label emails from boss@x.com as Work", ctx),
+                         "Would label emails matching 'from:boss@x.com' as 'Work'.")
+        self.assertIn("trash", gm("trash emails older than 60 days", ctx))
+        self.assertIn("What label", gm("label emails from x@y.com", ctx))        # missing label
+        self.assertIn("what to do", gm("do something with my inbox", ctx).lower())  # no action
 
     def test_write_file_routes_and_resolves_path(self):
         jarvis = self.make()

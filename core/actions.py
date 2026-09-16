@@ -552,6 +552,25 @@ class ActionBroker:
     def search_gmail(self, query: str) -> str:
         return self._google_read(f"Search your Gmail for '{query}'", "search_gmail", query)
 
+    def gmail_organize(self, query: str, action: str, label: str | None = None) -> str:
+        """Organize inbox mail (archive / mark read / trash / label). Gated by 'google'. Never sends or
+        permanently deletes."""
+        summary = f"Gmail: {action} emails matching '{query}'" + (f" as '{label}'" if label else "")
+        req = ActionRequest("google", summary, details=query)
+
+        def do():
+            from core.google import GoogleAuth, GoogleClient, GoogleError
+
+            auth = GoogleAuth()
+            if not auth.is_connected():
+                return "Google isn't connected yet. Run:  jarvis google login"
+            try:
+                return GoogleClient(auth).gmail_organize(query, action, label)
+            except GoogleError as exc:
+                return f"Google request failed: {exc}"
+
+        return self._gated(req, do, f"Would {summary}.")
+
     # ---- packages -----------------------------------------------------------------------------
 
     def install_package(self, name: str) -> str:

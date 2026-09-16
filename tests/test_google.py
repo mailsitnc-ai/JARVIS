@@ -51,6 +51,31 @@ class GoogleClientTests(IsolatedCase):
         self.assertIn("alice@x.com", out)
 
 
+    def test_gmail_organize_archive_removes_inbox_label(self):
+        client = google.GoogleClient(google.GoogleAuth())
+        posts = []
+        with mock.patch.object(client, "_get", return_value={"messages": [{"id": "a"}, {"id": "b"}]}), \
+                mock.patch.object(client, "_post", side_effect=lambda url, body: posts.append((url, body)) or {}):
+            out = client.gmail_organize("category:promotions", "archive")
+        self.assertIn("Archived: 2", out)
+        self.assertIn("batchModify", posts[0][0])
+        self.assertEqual(posts[0][1]["removeLabelIds"], ["INBOX"])
+
+    def test_gmail_organize_label_creates_and_applies(self):
+        client = google.GoogleClient(google.GoogleAuth())
+        calls = []
+
+        def fake_post(url, body):
+            calls.append((url, body))
+            return {"id": "Label_9"} if url.endswith("/labels") else {}
+
+        with mock.patch.object(client, "_get", side_effect=[{"messages": [{"id": "m1"}]}, {"labels": []}]), \
+                mock.patch.object(client, "_post", side_effect=fake_post):
+            out = client.gmail_organize("from:boss@x.com", "label", "Work")
+        self.assertIn("Labelled 'Work'", out)
+        self.assertTrue(any(b.get("addLabelIds") == ["Label_9"] for _u, b in calls))
+
+
 class GoogleBrokerTests(IsolatedCase):
     def test_not_connected_message(self):
         broker = ActionBroker(permissions=PermissionRegistry(self.tmp / "p.json"), confirm=lambda req: "once")
