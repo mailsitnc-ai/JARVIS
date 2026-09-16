@@ -31,9 +31,13 @@ CAPABILITIES = {
     "google": "Read your Google Drive and Gmail",
     "notify": "Show popups and desktop notifications",
     "self_edit": "Rewrite JARVIS's own source code",
+    "camera": "Use the webcam (only when you ask)",
 }
 STATES = ("ask", "allow", "deny")
 DEFAULT_STATE = "ask"
+# Privacy-sensitive: autonomy does NOT blanket-allow these - they stay at their own setting so the
+# camera never fires from a background/scheduled task, only from an explicit command you approve.
+SENSITIVE = {"camera"}
 
 
 class PermissionRegistry:
@@ -67,8 +71,8 @@ class PermissionRegistry:
     def state(self, capability: str) -> str:
         with self._lock:
             self._refresh()
-            if self._autonomy:
-                return "allow"  # unleashed: every capability is granted while autonomy is on
+            if self._autonomy and capability not in SENSITIVE:
+                return "allow"  # unleashed: every non-sensitive capability is granted while autonomy is on
             return self._grants.get(capability, DEFAULT_STATE)
 
     def autonomy(self) -> bool:

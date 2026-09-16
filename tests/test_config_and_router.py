@@ -68,6 +68,23 @@ class ConfigTests(IsolatedCase):
         self.assertEqual(router.last_provider, "gemini")
 
 
+class VisionTests(IsolatedCase):
+    def test_describe_image_uses_gemini_when_available(self):
+        from core import vision
+        keystore.store_key("gemini", "k")
+        img = self.tmp / "x.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n")
+        self.assertTrue(vision.available())
+        with mock.patch("core.vision.http_json",
+                        return_value=HttpResponse(200, {"choices": [{"message": {"content": "a cat on a desk"}}]}, "", {})):
+            self.assertEqual(vision.describe_image(str(img)), "a cat on a desk")
+
+    def test_describe_image_none_without_a_vision_model(self):
+        from core import vision
+        self.assertFalse(vision.available())
+        self.assertIsNone(vision.describe_image("whatever.png"))
+
+
 class UsageAndModelTests(IsolatedCase):
     def test_usage_store_accumulates_and_resets(self):
         from core.usage import UsageStore

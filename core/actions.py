@@ -422,6 +422,43 @@ class ActionBroker:
 
         return self._gated(req, do, f"Would capture the screen to {target}.")
 
+    # ---- camera -------------------------------------------------------------------------------
+
+    def capture_camera(self, path: str | None = None) -> str:
+        """Grab a single frame from the webcam and save it. Gated by 'camera' (never auto-allowed)."""
+        target = Path(path).expanduser() if path else self.pictures_dir / f"JARVIS-cam-{time.strftime('%Y%m%d-%H%M%S')}.png"
+        req = ActionRequest("camera", "Take a photo with the webcam", details=str(target))
+
+        def do():
+            _make_installed_packages_importable()
+            try:
+                import cv2  # noqa: F401
+            except ImportError:
+                self.install_package("opencv-python-headless")  # gated by 'packages'
+                _make_installed_packages_importable()
+                try:
+                    import cv2
+                except ImportError:
+                    return "I need the 'opencv-python-headless' package for the camera and couldn't load it."
+            cap = cv2.VideoCapture(0, getattr(cv2, "CAP_DSHOW", 0))  # DirectShow: opens fast on Windows
+            if not cap or not cap.isOpened():
+                if cap:
+                    cap.release()
+                return "I couldn't open the webcam (is one connected / not in use by another app?)."
+            frame = None
+            for _ in range(6):            # let auto-exposure settle before grabbing
+                ok, frame = cap.read()
+            cap.release()
+            if frame is None:
+                return "The webcam opened but returned no image."
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not cv2.imwrite(str(target), frame):
+                return f"Couldn't save the photo to {target}."
+            self._remember_written(target)
+            return f"Photo saved to {target}"
+
+        return self._gated(req, do, f"Would take a webcam photo to {target}.")
+
     # ---- files --------------------------------------------------------------------------------
 
     def read_file(self, path: str) -> str:

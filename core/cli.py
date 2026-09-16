@@ -619,9 +619,11 @@ def cmd_doctor(args) -> int:
 
     perms = PermissionRegistry()
     if perms.autonomy():
+        from .permissions import SENSITIVE
         print("\nPermissions  [AUTONOMY ON - acts without asking; turn off: jarvis autonomy off]")
         for capability in CAPABILITIES:
-            print(f"  {capability:<12} allow (autonomy)")
+            note = f"{perms.state(capability)} (still gated - privacy)" if capability in SENSITIVE else "allow (autonomy)"
+            print(f"  {capability:<12} {note}")
     else:
         print("\nPermissions (jarvis permissions <capability> allow|deny|ask;  unleash: jarvis autonomy on)")
         for capability in CAPABILITIES:

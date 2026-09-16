@@ -33,6 +33,14 @@ class PermissionTests(IsolatedCase):
         with self.assertRaises(ValueError):
             reg.set("open", "maybe")
 
+    def test_camera_is_privacy_exempt_from_autonomy(self):
+        reg = PermissionRegistry(self.tmp / "permissions.json")
+        reg.set_autonomy(True)
+        self.assertEqual(reg.state("open"), "allow")     # normal capability: unleashed
+        self.assertEqual(reg.state("camera"), "ask")     # sensitive: still gated even while unleashed
+        reg.set("camera", "allow")
+        self.assertEqual(reg.state("camera"), "allow")   # unless you explicitly allow it
+
     def test_autonomy_allows_everything_and_persists(self):
         reg = PermissionRegistry(self.tmp / "permissions.json")
         reg.set("screen", "deny")  # even an explicit deny is overridden while unleashed
@@ -111,6 +119,13 @@ class ActionBrokerLiveTests(IsolatedCase):
         with mock.patch("core.actions.webbrowser.open") as wb2:
             default.open_url("example.com")
             wb2.assert_called_once()
+
+    def test_capture_camera_dry_run_and_gate(self):
+        self.assertIn("Would take a webcam photo", ActionBroker(dry_run=True).capture_camera())
+        perms = PermissionRegistry(self.tmp / "p.json")
+        perms.set("camera", "deny")
+        with self.assertRaises(Blocked):
+            ActionBroker(permissions=perms).capture_camera()
 
     def test_run_python_launches_the_interpreter(self):
         perms = PermissionRegistry(self.tmp / "p.json")
