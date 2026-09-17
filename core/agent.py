@@ -15,6 +15,8 @@ AGENT_SYSTEM = (
     "or finish.\n"
     "- Each instruction is one plain command JARVIS can run with a skill: e.g. 'open notepad', 'get the "
     "price of bitcoin in usd', 'search my gmail for invoices', 'calculate 3*47'. Never include a skill name.\n"
+    "- To search a website, keep the word 'search': 'search youtube for lofi', 'search scholar for X'. "
+    "Never turn a search into a bare topic ('super capacitors') - that won't run.\n"
     "- Use the results so far. If a step failed or returned something unexpected, adapt - try a different "
     "instruction, don't just repeat it.\n"
     "- When the goal is met (or truly can't be), set done=true and write the final answer for the user, "

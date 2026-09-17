@@ -37,7 +37,9 @@ UNDERSTAND_SYSTEM = (
     "a plain instruction the user would say (e.g. 'open google docs') - NEVER prefix it with a skill name. "
     "For a live fact, write a step that GETS the answer (e.g. 'get the current price of bitcoin in usd') "
     "so JARVIS fetches and reports it - do NOT turn it into a web search. Only use 'search the web for X' "
-    "when the user explicitly says to search/look something up. Rewrite vague references "
+    "when the user explicitly says to search/look something up. To search a website, write the step as "
+    "'search <site> for <query>' and KEEP the word 'search' (e.g. 'search youtube for lofi', 'search "
+    "scholar for supercapacitors') - never drop it to a bare topic. Rewrite vague references "
     "('google docs' -> 'open google docs'). Split only genuinely separate actions.\n"
     "  To write a program/script/app/webpage/file and save it (and optionally open/run it), that is ONE "
     "step - keep it whole (e.g. 'write a python snake game, save it as snake.py and open it'). Never turn "
@@ -73,6 +75,10 @@ _EXAMPLES = [
      {"intent": "act", "steps": ["write a python program that prints the fibonacci numbers and save it to my desktop as fib.py"]}),
     ("Message: make me a tetris game and open it",
      {"intent": "act", "steps": ["write a tetris game, save it as tetris.py and open it"]}),
+    ("Message: search youtube for lofi beats",
+     {"intent": "act", "steps": ["search youtube for lofi beats"]}),
+    ("Message: open google scholar and search up super capacitors",
+     {"intent": "act", "steps": ["open google scholar", "search scholar for super capacitors"]}),
 ]
 
 

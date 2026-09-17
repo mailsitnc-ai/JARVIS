@@ -138,6 +138,50 @@ class BrokerRecordsFocusTests(IsolatedCase):
         self.assertEqual(f.most_recent(), "https://example.com")  # opened after writing
 
 
+class _RecordingActions:
+    def __init__(self):
+        self.opened = None
+
+    def open_url(self, url):
+        self.opened = url
+        return f"Opening {url}"
+
+
+class WebSearchSiteTests(IsolatedCase):
+    def _skill(self):
+        from core.config import SKILLS_DIR
+        from core.skill_loader import SkillRegistry
+        reg = SkillRegistry(SKILLS_DIR)
+        reg.reload()
+        return reg.get("web_search")
+
+    def _url(self, request, focus=None):
+        act = _RecordingActions()
+        ctx = {"actions": act}
+        if focus is not None:
+            ctx["focus"] = focus
+        self._skill().run(request, ctx)
+        return act.opened
+
+    def test_generic_search_uses_google(self):
+        self.assertIn("google.com/search", self._url("search the web for cats"))
+        self.assertIn("cats", self._url("search the web for cats"))
+
+    def test_named_sites(self):
+        self.assertIn("scholar.google.com", self._url("search scholar for supercapacitors"))
+        self.assertIn("scholar.google.com", self._url("search supercapacitors on google scholar"))
+        self.assertIn("youtube.com/results", self._url("search youtube for lofi beats"))
+        self.assertIn("wikipedia.org", self._url("look up quantum computing on wikipedia"))
+
+    def test_bare_search_uses_the_site_in_focus(self):
+        url = self._url("search up super capacitors", focus={"url": "https://scholar.google.com"})
+        self.assertIn("scholar.google.com", url)
+
+    def test_explicit_web_overrides_the_focus_site(self):
+        url = self._url("search the web for cats", focus={"url": "https://www.youtube.com"})
+        self.assertIn("google.com/search", url)
+
+
 class RecordVideoSkillTests(IsolatedCase):
     def _skill(self):
         from core.config import SKILLS_DIR
