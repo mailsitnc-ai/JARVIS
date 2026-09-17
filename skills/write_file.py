@@ -7,9 +7,15 @@ call - are caught here and repaired by the model in a loop before the file is ev
 packages are installed. Only code that starts cleanly gets saved.
 """
 import re
-import subprocess
 import sys
 from pathlib import Path
+
+from core.pyverify import GUI as _GUI
+from core.pyverify import SYSTEM as _SYSTEM
+from core.pyverify import install_missing as _install_missing
+from core.pyverify import smoke_run as _smoke_run
+from core.pyverify import unfence as _unfence
+from core.pyverify import verify_python as _verify_python
 
 SKILL = {
     "name": "write_file",
@@ -30,21 +36,24 @@ _FOLDERS = {
     "desktop": "Desktop", "documents": "Documents", "downloads": "Downloads",
     "pictures": "Pictures", "music": "Music", "videos": "Videos",
 }
-_FENCE = re.compile(r"^\s*```[\w+-]*\s*\n(.*?)\n?```\s*$", re.DOTALL)
-_SYSTEM = ("You generate the raw contents of a single file. Output ONLY the file's contents - no "
-           "explanation, no commentary, no markdown code fences. Write a COMPLETE, RUNNABLE program: "
-           "every import present, no placeholders, no '...', no TODOs, nothing left for the user to fill "
-           "in. Prefer the Python standard library; use a third-party package only if truly needed. For "
-           "a GUI app use tkinter. Put runnable code under `if __name__ == \"__main__\":`.")
-
 _CODE_EXT = {"py", "pyw", "html", "htm", "js", "ts", "css", "java", "c", "cpp", "cs", "rb", "go", "rs",
              "php", "sh", "ps1", "bat", "json", "md", "txt", "csv"}
-# Exceptions that mean the file is genuinely broken (they fire at startup, before any user input),
-# so they're worth a repair. Errors like EOFError/ValueError can come from our blank smoke-test input,
-# so they are NOT treated as failures - we don't want to "fix" a perfectly good interactive app.
-_STRUCTURAL = ("ModuleNotFoundError", "ImportError", "NameError", "AttributeError", "IndentationError",
-               "SyntaxError", "TabError", "UnboundLocalError")
-_GUI = re.compile(r"\b(?:tkinter|PyQt5|PyQt6|PySide2|PySide6|pygame|kivy|wx|turtle)\b|\.mainloop\s*\(")
+
+
+def _auto_name(request):
+    """Invent a sensible filename when the user didn't give one ('make a calculator app' -> calculator.py)."""
+    low = request.strip().lower()
+    ext = "py"
+    if re.search(r"\b(?:html|web\s*page|website|landing\s*page)\b", low):
+        ext = "html"
+    elif re.search(r"\b(?:document|note|essay|report|letter|story|readme|paper|list)\b", low):
+        ext = "txt"
+    core = re.sub(r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)?(?:make|create|build|write|generate|code|"
+                  r"design|develop)\s+(?:me\s+)?(?:the|an|a)?\s+", "", low)
+    core = re.split(r"\b(?:that|which|to|for|with|so|in|using)\b", core)[0]
+    core = re.sub(r"\b(?:app|application|program|script|game|tool|python|simple|basic|little)\b", " ", core)
+    words = re.findall(r"[a-z0-9]+", core)[:3]
+    return f"{'_'.join(words) or 'app'}.{ext}"
 
 
 def _target_path(request):
@@ -79,7 +88,7 @@ def _target_path(request):
                 return p, p.name
             folder = p
     if not name:
-        return None, None
+        name = _auto_name(request)   # no filename given -> invent one instead of nagging
     return folder / name, name
 
 
@@ -88,113 +97,6 @@ def _describe(request):
     text = re.sub(r"\b(?:and\s+)?save\s+(?:it|this|that)?\s*(?:as|to|in)\b.*$", "", request, flags=re.IGNORECASE)
     text = re.sub(r"\b(?:named|called)\s+[\"']?[\w .\-]+[\"']?", "", text, flags=re.IGNORECASE)
     return text.strip(" .") or request
-
-
-def _unfence(text):
-    fence = _FENCE.match(text.strip())
-    return (fence.group(1) if fence else text).strip()
-
-
-def _install_missing(content, context):
-    """Install any third-party packages the code imports so it can actually run. Returns a note list."""
-    import ast
-    import importlib.util
-
-    from evolution_engine.sandbox import MODULE_TO_PIP
-
-    stdlib = getattr(sys, "stdlib_module_names", set())
-    notes = []
-    try:
-        tree = ast.parse(content)
-    except SyntaxError:
-        return notes
-    missing = set()
-    for node in ast.walk(tree):
-        mods = []
-        if isinstance(node, ast.Import):
-            mods = [a.name.split(".")[0] for a in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            mods = [node.module.split(".")[0]]
-        for m in mods:
-            if m and m not in stdlib and importlib.util.find_spec(m) is None:
-                missing.add(m)
-    for m in sorted(missing):
-        try:
-            context["actions"].install_package(MODULE_TO_PIP.get(m, m))
-            notes.append(f"installed {m}")
-            importlib.invalidate_caches()
-        except Exception:
-            notes.append(f"needs '{m}' (couldn't install)")
-    return notes
-
-
-def _smoke_run(content):
-    """Actually run the code briefly. Returns (ok, error_text). A GUI/loop app that is still alive when
-    the timer runs out counts as OK (it started). Only a structural exception at startup is a failure."""
-    import tempfile
-
-    gui = bool(_GUI.search(content))
-    timeout = 3.0 if gui else 6.0
-    tmp = Path(tempfile.gettempdir()) / f"jarvis_smoke_{abs(hash(content)) % 10**8}.py"
-    try:
-        tmp.write_text(content, encoding="utf-8")
-    except OSError:
-        return True, None  # can't write a temp copy -> skip the smoke test rather than block
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    try:
-        proc = subprocess.run([sys.executable, str(tmp)], input="\n\n\n\n\n", text=True,
-                              capture_output=True, timeout=timeout, creationflags=flags)
-    except subprocess.TimeoutExpired:
-        return True, None            # still running after the timeout = it launched fine (GUI/main loop)
-    except OSError as exc:
-        return True, None            # couldn't launch a subprocess here; don't block on the smoke test
-    finally:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-    if proc.returncode == 0:
-        return True, None
-    stderr = (proc.stderr or "").strip()
-    last = stderr.splitlines()[-1] if stderr else ""
-    exc_type = last.split(":", 1)[0].strip()
-    if exc_type in _STRUCTURAL:
-        return False, stderr[-1500:]
-    return True, None                # a non-structural error (likely from blank smoke-test input) - accept it
-
-
-def _verify_python(name, content, context):
-    """Syntax-check, install packages, then smoke-run; repair with the model on failure. (content, note)."""
-    import ast
-
-    ask = context.get("llm")
-    notes = []
-    for attempt in range(4):
-        try:
-            ast.parse(content)
-        except SyntaxError as exc:
-            if ask is None or attempt == 3:
-                return content, " (heads up: a syntax error remains)"
-            content = _unfence(str(ask(
-                f"This Python file {name!r} has a syntax error: {exc.msg} at line {exc.lineno}. Return the "
-                f"corrected COMPLETE file, code only:\n{content}", system=_SYSTEM, temperature=0.1, max_tokens=3000)))
-            continue
-        notes = _install_missing(content, context)
-        ok, error = _smoke_run(content)
-        if ok:
-            tag = "verified it runs"
-            if notes:
-                tag += "; " + "; ".join(notes)
-            return content, f" ({tag})"
-        if ask is None or attempt == 3:
-            return content, f" (heads up: it still errors on start - {(error or '').splitlines()[-1] if error else 'unknown'})"
-        context.get("emit", lambda *a: None)("repair", f"'{name}' crashed on start; fixing it and re-testing...")
-        content = _unfence(str(ask(
-            f"This Python program {name!r} fails when run. Fix the bug so it starts and runs correctly. "
-            f"Return the COMPLETE corrected file, code only - no explanation.\n\n"
-            f"--- error ---\n{error}\n\n--- current file ---\n{content}",
-            system=_SYSTEM, temperature=0.1, max_tokens=3000)))
-    return content, ""
 
 
 def _python_exe():
