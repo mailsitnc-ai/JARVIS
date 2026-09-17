@@ -27,9 +27,11 @@ from evolution_engine.analyzer import is_meta_request, looks_actionable
 from .actions import ActionBroker, ActionRequest, Blocked
 from .actions import _normalize_decision
 from .config import MEMORY_DIR, ROOT, Settings, load_settings
+from .focus import Focus
 from .interpreter import normalize_command, smalltalk_reply
 from .llm_router import LLMError, LLMRouter
 from .permissions import PermissionRegistry
+from .refs import resolve_references
 from .skill_loader import Skill, SkillRegistry
 
 
@@ -90,6 +92,7 @@ class Jarvis:
             self._state_dir = user_dir()
         except OSError:
             self._state_dir = None
+        self._focus = Focus(self._state_dir)  # tracks what "it"/"the photo"/"the file" refer to
         self.llm = llm if llm is not None else LLMRouter(self.settings)
         if hasattr(self.llm, "on_progress"):
             self.llm.on_progress = lambda message: self._emit("llm", message)
@@ -187,12 +190,26 @@ class Jarvis:
 
         return ack, job
 
+    def _resolve_refs(self, request: str) -> str:
+        """Rewrite a back-reference ("open it", "the photo") to the concrete thing the conversation is
+        about, so routing and understanding get a target instead of a dangling pronoun."""
+        try:
+            resolved, changed = resolve_references(request, self._focus)
+        except Exception:
+            return request
+        if changed and resolved != request:
+            self._emit("context", f"Understood '{request}' as: {resolved}")
+            return resolved
+        return request
+
     def _fast(self, request: str, force_evolve: bool):
         """The quick decisions. None => needs a build. Cloud brain -> LLM understanding; local -> rules."""
         self.llm.last_provider = None
         self.registry.reload()  # picks up skills edited or added by hand, too
         if force_evolve:
             return None
+        # Resolve "it"/"that"/"the photo" against the conversation focus BEFORE routing.
+        request = self._resolve_refs(request)
         if _SELF_EDIT.search(request) or self._improve_target(request) is not None:
             return None  # "rewrite your own code" / "improve your X skill" -> the (backgroundable) build path
         return self._fast_cloud(request) if self._use_planner() else self._fast_local(request)
@@ -422,6 +439,13 @@ class Jarvis:
 
         outputs, used = [], []
         for clean, found in steps:
+            # Resolve references now, after earlier steps ran: "take a photo and open it" -> the new photo.
+            try:
+                resolved, changed = resolve_references(clean, self._focus)
+            except Exception:
+                resolved, changed = clean, False
+            if changed:
+                clean, found = resolved, self.candidates(resolved)
             text = None
             for skill in found:
                 self._emit("route", f"Step '{clean}' -> skill '{skill.name}'")
@@ -485,6 +509,10 @@ class Jarvis:
 
         build_only: the model already decided this is a task, so build+run rather than answer with a snippet.
         """
+        try:                      # resolve a reference that survived into a step ("...and open it")
+            step, _changed = resolve_references(step, self._focus)
+        except Exception:
+            pass
         handled = self._try_skills(self.candidates(step), step, "trigger")
         if handled is not None:
             return handled
@@ -494,7 +522,8 @@ class Jarvis:
         from .understand import understand
 
         try:
-            reading = understand(self.llm, request, self.history, self.registry.summaries(), self._settings_hint())
+            reading = understand(self.llm, request, self.history, self.registry.summaries(),
+                                 self._settings_hint(), self._focus_hint())
         except LLMError:
             return None
 
@@ -560,6 +589,16 @@ class Jarvis:
         # Ran out of steps or looped: hand back what we gathered.
         answer = transcript[-1][1] if transcript else "I couldn't complete that."
         return answer, " + ".join(dict.fromkeys(used)) or None, "agent"
+
+    def _focus_hint(self) -> str:
+        """A short 'Current context' block naming the file/image/url the conversation is about, so the
+        understanding layer can resolve references the deterministic resolver didn't catch."""
+        snap = self._focus.snapshot()
+        labels = {"file": "file", "image": "image/photo", "url": "web page", "app": "app", "folder": "folder"}
+        lines = [f"- {labels.get(slot, slot)}: {value}" for slot, value in snap.items() if slot != "file" or "image" not in snap]
+        if not lines:
+            return ""
+        return "Current context (the things this conversation is about right now):\n" + "\n".join(lines)
 
     def _settings_hint(self) -> str:
         s = self.settings
@@ -708,7 +747,8 @@ class Jarvis:
                               state_dir=self._state_dir, browser=self.settings.get("window.browser", "chrome"))
         return {"dry_run": False, "llm": ask_llm, "memory": recalled, "platform": "windows",
                 "emit": self._emit, "root": str(ROOT), "actions": broker, "permissions": self.permissions,
-                "run": lambda sub: self._subrun(sub, depth), "skills": sorted(self.registry.skills)}
+                "run": lambda sub: self._subrun(sub, depth), "skills": sorted(self.registry.skills),
+                "focus": self._focus.snapshot()}
 
     def _execute(self, skill: Skill, request: str, depth: int = 0, repairs_left: int = 2) -> str | None:
         """Run a skill; if it fails (crashes OR returns a swallowed error), rebuild it and try again.

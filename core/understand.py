@@ -42,6 +42,9 @@ UNDERSTAND_SYSTEM = (
     "  To write a program/script/app/webpage/file and save it (and optionally open/run it), that is ONE "
     "step - keep it whole (e.g. 'write a python snake game, save it as snake.py and open it'). Never turn "
     "it into opening Notepad and typing.\n"
+    "  If a 'Current context' block is given, resolve pronouns and vague references in the message "
+    "against it ('open it', 'email that', 'make it landscape' refer to the file/image/url listed there) "
+    "and put the concrete path or URL into the step.\n"
     "- intent 'preference': the user wants to change a setting permanently (which AI model to use, the "
     "hotkey, the split, etc.). Set 'setting' to one of the allowed keys, 'value' to the new value, and "
     "'summary' to a short human description. To change the main AI, set llm.fallback_order with the "
@@ -83,14 +86,16 @@ class Understanding:
     summary: str = ""
 
 
-def understand(llm, request: str, history, skill_summaries: str, settings_hint: str) -> Understanding:
+def understand(llm, request: str, history, skill_summaries: str, settings_hint: str,
+               focus_hint: str = "") -> Understanding:
     messages = [{"role": "system", "content": UNDERSTAND_SYSTEM}]
     for example_user, example_reply in _EXAMPLES:
         messages.append({"role": "user", "content": example_user})
         messages.append({"role": "assistant", "content": json.dumps(example_reply)})
     context = "\n".join(f"{who}: {text}" for who, text in list(history)[-6:])
-    body = (f"Conversation:\n{context or '(none)'}\n\nSkills: {skill_summaries or '(none)'}\n\n"
-            f"{settings_hint}\n\nMessage: {request}")
+    body = (f"Conversation:\n{context or '(none)'}\n\n"
+            + (f"{focus_hint}\n\n" if focus_hint else "")
+            + f"Skills: {skill_summaries or '(none)'}\n\n{settings_hint}\n\nMessage: {request}")
     messages.append({"role": "user", "content": body})
 
     text = llm.complete(messages=messages, temperature=0.1, max_tokens=400)

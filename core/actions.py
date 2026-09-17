@@ -20,6 +20,7 @@ harness can load it by path and give verified skills the same (dry-run) broker.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -307,11 +308,17 @@ class ActionBroker:
             return self.open_url(url) if url else None
         label, candidates = resolved
         req = ActionRequest("open", f"Open {label}", details=candidates[0])
-        return self._gated(
-            req,
-            lambda: f"Opening {label}." if self._launch(candidates) else f"I couldn't find {label} on this PC.",
-            f"Would open {label}.",
-        )
+
+        def do():
+            if not self._launch(candidates):
+                return f"I couldn't find {label} on this PC."
+            if label.endswith(" folder"):
+                self.remember_focus("folder", candidates[0])   # "open the folder" later reuses it
+            else:
+                self.remember_focus("app", name)
+            return f"Opening {label}."
+
+        return self._gated(req, do, f"Would open {label}.")
 
     def _browser_exe(self) -> str | None:
         """The executable for the preferred browser, so URLs open there (and reuse its window) instead of
@@ -333,6 +340,7 @@ class ActionBroker:
         req = ActionRequest("open", f"Open {full} in your browser", details=full)
 
         def do():
+            self.remember_focus("url", full)  # "open it again" / "share the link" -> this URL
             exe = self._browser_exe()
             if exe:                       # launch the chosen browser; if it's already open, this is a new tab
                 try:
@@ -357,6 +365,8 @@ class ActionBroker:
             if not target.exists():
                 return f"There's nothing at {target}."
             os.startfile(str(target))
+            is_image = target.suffix.lower().lstrip(".") in _FILE_CATEGORIES["Images"]
+            self.remember_focus("image" if is_image else "file", target)
             return f"Opening {target}."
 
         return self._gated(req, do, f"Would open {target}.")
@@ -418,6 +428,7 @@ class ActionBroker:
             if result.returncode != 0 or not target.exists():
                 return f"Screenshot failed: {(result.stderr or '').strip()[:200] or 'unknown error'}"
             self._remember_screenshot(target)
+            self.remember_focus("image", target)  # "open it" / "read the screenshot" -> this capture
             return f"Screenshot saved to {target}"
 
         return self._gated(req, do, f"Would capture the screen to {target}.")
@@ -455,6 +466,7 @@ class ActionBroker:
             if not cv2.imwrite(str(target), frame):
                 return f"Couldn't save the photo to {target}."
             self._remember_written(target)
+            self.remember_focus("image", target)  # "open it" / "what's in the photo" -> this photo
             return f"Photo saved to {target}"
 
         return self._gated(req, do, f"Would take a webcam photo to {target}.")
@@ -542,6 +554,31 @@ class ActionBroker:
                 record.write_text(str(path), encoding="utf-8")
             except OSError:
                 pass
+        self.remember_focus("file", path)
+
+    def remember_focus(self, slot: str, value) -> None:
+        """Record the concrete thing this turn touched (a file/image/url/app/folder) so a later
+        "open it" / "the photo" resolves to it. Written as plain JSON with the stdlib only, so this
+        module stays importable by the sandbox harness; core.focus.Focus reads the same file."""
+        if not self.state_dir or slot not in ("file", "image", "url", "app", "folder") or not value:
+            return
+        path = self.state_dir / "focus.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+            if not isinstance(data, dict):
+                data = {}
+        except (OSError, ValueError):
+            data = {}
+        now = time.time()
+        data[slot] = {"value": str(value), "ts": now}
+        if slot == "image":
+            data["file"] = {"value": str(value), "ts": now}
+        try:
+            tmp = path.with_name("focus.json.tmp")
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            tmp.replace(path)
+        except OSError:
+            pass
 
     def last_written(self) -> Path | None:
         """The most recent file JARVIS wrote (that still exists), or None."""
