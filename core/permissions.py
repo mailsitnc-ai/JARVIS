@@ -32,6 +32,7 @@ CAPABILITIES = {
     "notify": "Show popups and desktop notifications",
     "self_edit": "Rewrite JARVIS's own source code",
     "camera": "Use the webcam (only when you ask)",
+    "browser": "Control the web browser - read pages, click and type (Chrome DevTools)",
 }
 STATES = ("ask", "allow", "deny")
 DEFAULT_STATE = "ask"

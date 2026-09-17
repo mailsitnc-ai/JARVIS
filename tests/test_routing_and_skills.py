@@ -12,7 +12,7 @@ from tests.helpers import FakeLLM, IsolatedCase
 BUILTIN_SKILLS = ("temperature_converter", "current_time", "calculator", "system_status", "open_app",
                   "web_search", "screenshot", "browser_tab", "show_screenshot", "speak",
                   "drive_search", "gmail_search", "popup", "write_file", "open_last", "organize_files",
-                  "gmail_organize", "camera", "observe_screen", "record_video")
+                  "gmail_organize", "camera", "observe_screen", "record_video", "browser_control")
 
 
 class RoutingTests(IsolatedCase):

@@ -191,7 +191,7 @@ def _normalize_decision(value) -> str:
 
 class ActionBroker:
     def __init__(self, *, dry_run=False, permissions=None, confirm=None, emit=None, pictures_dir=None,
-                 state_dir=None, browser=None):
+                 state_dir=None, browser=None, browser_port=9222, browser_profile=None):
         self.dry_run = dry_run
         self.permissions = permissions
         self.confirm = confirm           # callable(ActionRequest) -> "once" | "always" | "deny" | bool
@@ -199,6 +199,9 @@ class ActionBroker:
         self.pictures_dir = Path(pictures_dir) if pictures_dir else (Path.home() / "Pictures")
         self.state_dir = Path(state_dir) if state_dir else None  # where "last screenshot" is remembered
         self.browser = browser           # which browser to open URLs in ("chrome"/"edge"/path/None=OS default)
+        self.browser_port = browser_port         # Chrome DevTools remote-debugging port for DOM control
+        self.browser_profile = browser_profile   # dedicated Chrome profile dir (None -> default under APPDATA)
+        self._chrome = None
         self.performed: list[ActionRequest] = []
         self.simulated: list[ActionRequest] = []
         self.blocked: list[ActionRequest] = []
@@ -525,6 +528,85 @@ class ActionBroker:
             return f"Video saved to {target}"
 
         return self._gated(req, do, f"Would record a {int(seconds)}s webcam video to {target}.")
+
+    # ---- browser (Chrome DevTools) ------------------------------------------------------------
+
+    def _browser(self):
+        """A cached ChromeController. Imported lazily so this module stays sandbox-loadable."""
+        if getattr(self, "_chrome", None) is None:
+            from core.browser import ChromeController
+            self._chrome = ChromeController(port=int(self.browser_port or 9222),
+                                            profile_dir=self.browser_profile, installer=self.install_package)
+        return self._chrome
+
+    def _browser_action(self, summary: str, capability_detail: str, work, dry_value: str) -> str:
+        req = ActionRequest("browser", summary, details=capability_detail)
+
+        def do():
+            from core.browser import BrowserError
+            controller = self._browser()
+            try:
+                controller.ensure()
+                return work(controller)
+            except BrowserError as exc:
+                return f"Browser control failed: {exc}"
+
+        return self._gated(req, do, dry_value)
+
+    def browser_open(self, url: str) -> str:
+        full = url if str(url).lower().startswith("http") else f"https://{url}"
+
+        def work(c):
+            c.navigate(full)
+            self.remember_focus("url", c.current_url() or full)
+            title = c.title()
+            return f"Opened {title or full} — I can now read it, click and type on it." if title else f"Opened {full}."
+
+        return self._browser_action(f"Open {full} in the controllable browser", full, work,
+                                    f"Would open {full} in the controllable browser.")
+
+    def browser_read(self, max_chars: int = 6000) -> str:
+        def work(c):
+            text = c.text(max_chars)
+            return text or "The page has no readable text yet."
+
+        return self._browser_action("Read the current web page", "reads the page's visible text", work,
+                                    "[page text unavailable during verification]")
+
+    def browser_click(self, target: str) -> str:
+        def work(c):
+            return f"Clicked '{target}'." if c.click(target) else f"I couldn't find '{target}' to click on the page."
+
+        return self._browser_action(f"Click '{target}' on the page", target, work, f"Would click '{target}'.")
+
+    def browser_type(self, text: str, selector: str | None = None, submit: bool = False) -> str:
+        def work(c):
+            if not c.type_text(text, selector, submit):
+                return "I couldn't find a text box to type into on the page."
+            return f"Typed '{text}'" + (" and submitted." if submit else ".")
+
+        verb = "Type and submit" if submit else "Type"
+        return self._browser_action(f"{verb} '{text}' on the page", text, work, f"Would type '{text}'.")
+
+    def browser_run_js(self, expression: str) -> str:
+        def work(c):
+            value = c.evaluate(expression)
+            return f"Result: {value}" if value is not None else "Ran the script (no value returned)."
+
+        return self._browser_action("Run JavaScript on the page", expression[:120], work,
+                                    "Would run JavaScript on the page.")
+
+    def browser_screenshot(self, path: str | None = None) -> str:
+        target = Path(path).expanduser() if path else self.pictures_dir / f"JARVIS-page-{time.strftime('%Y%m%d-%H%M%S')}.png"
+
+        def work(c):
+            c.screenshot(str(target))
+            self._remember_screenshot(target)
+            self.remember_focus("image", target)
+            return f"Saved a screenshot of the page to {target}"
+
+        return self._browser_action(f"Screenshot the page to {target}", str(target), work,
+                                    f"Would screenshot the page to {target}.")
 
     # ---- files --------------------------------------------------------------------------------
 

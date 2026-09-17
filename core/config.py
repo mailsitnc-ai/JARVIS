@@ -72,6 +72,9 @@ DEFAULTS: dict[str, Any] = {
         # Which browser to open links/searches/tabs in: "chrome" reuses your Chrome window;
         # "default" uses the OS default; also "edge"/"firefox"/"brave" or a full path to the .exe.
         "browser": "chrome",
+        # Chrome DevTools remote-debugging port for DOM control (read/click/type). JARVIS launches its
+        # own Chrome window on this port with a dedicated profile, so it never disturbs your normal Chrome.
+        "debug_port": 9222,
         "split": 0.6,  # share of the screen kept by the window you were working in
         "jarvis_side": "right",
         "ipc_port": 47821,
