@@ -22,7 +22,8 @@ _SLOT_WORDS = {
     "folder": ("folder", "directory"),
     # 'file' is last so plain words like "document/script" don't shadow the more specific ones above.
     # ("doc"/"docs" is left out on purpose - "open the docs" usually means Google Docs, not a local file.)
-    "file": ("document", "script", "program", "file", "note", "spreadsheet",
+    "file": ("document", "script", "program", "file", "note", "spreadsheet", "video", "recording",
+             "clip", "movie", "footage", "download", "gif",
              "the one you made", "the one you created", "the thing you made"),
 }
 # Verbs that make something NEW - a word after them isn't a back-reference ("take a photo").
@@ -35,6 +36,10 @@ _CONSUME = ("open", "run", "launch", "start", "execute", "show", "display", "vie
 
 _DET = r"(?:the|that|this|these|those|my|it'?s)"
 _PRONOUN = re.compile(r"\b(it|that|this|them|those|these)\b", re.IGNORECASE)
+# A trailing relative clause on a reference: "the video (that) you just recorded", "the file I made".
+_REL_VERB = ("made", "created", "wrote", "written", "saved", "built", "recorded", "captured", "took",
+             "taken", "downloaded", "generated", "produced", "drew", "grabbed", "shot", "just")
+_REL_CLAUSE = r"(?:\s+(?:that\s+|which\s+)?(?:you|i|we)\s+(?:just\s+)?(?:" + "|".join(_REL_VERB) + r")\b)?"
 
 
 def _quote(value: str) -> str:
@@ -50,7 +55,7 @@ def _slot_phrase_patterns():
     pairs.sort(reverse=True)  # longest word first
     out = []
     for _n, slot, word in pairs:
-        out.append((re.compile(rf"\b{_DET}\s+{re.escape(word)}s?\b", re.IGNORECASE), slot, word))
+        out.append((re.compile(rf"\b{_DET}\s+{re.escape(word)}s?{_REL_CLAUSE}\b", re.IGNORECASE), slot, word))
     return out
 
 
@@ -60,6 +65,8 @@ _IMPERATIVE = re.compile(r"^\s*(?:please\s+|pls\s+|can\s+you\s+|could\s+you\s+|w
                          r"ok(?:ay)?\s+|jarvis[,\s]+)*(" + "|".join(_CONSUME) + r")\b", re.IGNORECASE)
 # "what's in it", "what is on the screenshot", "whats inside that"
 _WHATS_IN = re.compile(r"\bwhat(?:'?s| is| are)\s+(?:in|on|inside)\s+", re.IGNORECASE)
+# An explicit absolute path is already a concrete target - don't touch references around it.
+_ABS_PATH = re.compile(r"[A-Za-z]:[\\/]\S")
 
 
 def resolve_references(text: str, focus) -> tuple[str, bool]:
@@ -67,6 +74,8 @@ def resolve_references(text: str, focus) -> tuple[str, bool]:
     same get()/most_recent() API). Never raises - on any doubt it returns the text unchanged."""
     if not text or focus is None:
         return text, False
+    if _ABS_PATH.search(text):
+        return text, False  # already names a concrete path; the skill will open it directly
     try:
         return _resolve(text, focus)
     except Exception:

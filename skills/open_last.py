@@ -5,9 +5,11 @@ SKILL = {
     "name": "open_last",
     "description": "Open or run the file JARVIS just created, e.g. 'open it', 'run it', 'open the file you made'.",
     "triggers": [
-        r"^\s*(?:please\s+)?(?:open|run|launch|start|execute)\s+(?:it|that|this|them)\b",
-        r"^\s*(?:please\s+)?(?:open|run|launch|start|execute)\s+(?:up\s+)?the\s+(?:file|app|program|script|game|it)\b",
-        r"\b(?:open|run|launch|start|execute)\b[^.]*\byou\s+(?:just\s+)?(?:made|created|wrote|saved|built)\b",
+        r"^\s*(?:please\s+)?(?:open|run|launch|start|execute|show|play)\s+(?:it|that|this|them)\b",
+        r"^\s*(?:please\s+)?(?:open|run|launch|start|execute|show|play)\s+(?:up\s+)?the\s+"
+        r"(?:file|app|program|script|game|video|recording|clip|movie|photo|picture|image|screenshot|it)\b",
+        r"\b(?:open|run|launch|start|execute|show|play)\b[^.]*\byou\s+(?:just\s+)?"
+        r"(?:made|created|wrote|saved|built|recorded|captured|took|taken|downloaded|generated)\b",
     ],
     "version": 1,
     "origin": "builtin",

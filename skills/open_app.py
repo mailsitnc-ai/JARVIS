@@ -14,8 +14,11 @@ SKILL = {
 # Phrases that aren't an app/site name: let another skill (show_screenshot, browser_tab, evolution) handle them.
 _DEFER = re.compile(r"\b(?:screenshot|screen\s*shot|folder|file|where|saved|stored|\btab\b)\b", re.IGNORECASE)
 # Pronoun / "the thing I just made" targets belong to open_last, not here ("open it", "run that").
-_PRONOUN = re.compile(r"^(?:it|that|this|them|the\s+(?:file|app|program|script|game|one))\b"
-                      r"|you\s+(?:just\s+)?(?:made|created|wrote|saved|built)", re.IGNORECASE)
+_PRONOUN = re.compile(
+    r"^(?:it|that|this|them|the\s+(?:file|app|program|script|game|one|video|recording|clip|movie|"
+    r"photo|picture|image|screenshot))\b"
+    r"|you\s+(?:just\s+)?(?:made|created|wrote|saved|built|recorded|captured|took|taken|downloaded|generated)",
+    re.IGNORECASE)
 
 
 def _actions(context):
@@ -42,6 +45,14 @@ def _resolve_file(target, context):
 
 
 def run(request, context):
+    # An explicit absolute path anywhere in the request wins: "open the video in this file path: C:\...\x.mp4".
+    explicit = re.search(r"[A-Za-z]:[\\/][^\"'<>|?*\n]+?\.[A-Za-z0-9]{1,5}", request)
+    if explicit:
+        target = Path(explicit.group(0).strip().strip("\"'")).expanduser()
+        if target.exists():
+            return _actions(context).open_path(str(target))
+        return f"I couldn't find a file at {target}."
+
     match = re.match(r"^\s*(?:please\s+)?(?:open|launch|start)\s+(?:up\s+)?(?:the\s+|my\s+)?(.+?)[\s.!?]*$",
                      request, re.IGNORECASE)
     if not match:

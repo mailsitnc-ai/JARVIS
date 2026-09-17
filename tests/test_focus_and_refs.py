@@ -101,6 +101,26 @@ class ResolveReferenceTests(IsolatedCase):
         self.assertIn("https://example.com/page", out)
         self.assertNotIn('"', out)  # URLs aren't quoted
 
+    def test_video_reference_and_trailing_relative_clause(self):
+        vid = self.tmp / "clip.mp4"
+        vid.write_bytes(b"x")
+        f = self._focus_with(file=str(vid))
+        for phrase in ("open the video", "play the recording", "open the video you just recorded",
+                       "show me the clip i made"):
+            out, changed = resolve_references(phrase, f)
+            self.assertTrue(changed, phrase)
+            self.assertIn(str(vid), out, phrase)
+            self.assertNotIn("recorded", out.replace(str(vid), ""), phrase)  # clause was consumed
+
+    def test_explicit_absolute_path_is_left_untouched(self):
+        vid = self.tmp / "clip.mp4"
+        vid.write_bytes(b"x")
+        f = self._focus_with(file=str(vid))
+        phrase = f"open the video in this file path : {vid}"
+        out, changed = resolve_references(phrase, f)
+        self.assertFalse(changed)          # the skill extracts the path itself; don't garble it
+        self.assertEqual(out, phrase)
+
 
 class BrokerRecordsFocusTests(IsolatedCase):
     def test_write_file_and_open_url_update_the_focus(self):
@@ -116,6 +136,30 @@ class BrokerRecordsFocusTests(IsolatedCase):
         self.assertEqual(f.get("file"), str(target))
         self.assertEqual(f.get("url"), "https://example.com")
         self.assertEqual(f.most_recent(), "https://example.com")  # opened after writing
+
+
+class RecordVideoSkillTests(IsolatedCase):
+    def _skill(self):
+        from core.config import SKILLS_DIR
+        from core.skill_loader import SkillRegistry
+        reg = SkillRegistry(SKILLS_DIR)
+        reg.reload()
+        return reg.get("record_video")
+
+    def test_duration_and_destination_parsing(self):
+        skill = self._skill()
+        mod = skill.module
+        self.assertEqual(mod._duration("record a 10 second video of me"), 10.0)
+        self.assertEqual(mod._duration("take a 5s clip"), 5.0)
+        self.assertEqual(mod._duration("record a video of me"), 5.0)  # default
+        self.assertIn("Desktop", str(mod._destination("record a video and save it on my desktop")))
+        self.assertTrue(str(mod._destination(r"record to C:\Users\me\clip.mp4")).endswith("clip.mp4"))
+        self.assertIsNone(mod._destination("record a 3 second video of me"))
+
+    def test_dry_run_reports_the_duration(self):
+        skill = self._skill()
+        self.assertEqual(skill.run("record a 10 second video of me", {"dry_run": True}),
+                         "Would record a 10s webcam video.")
 
 
 if __name__ == "__main__":

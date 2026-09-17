@@ -1,61 +1,55 @@
-# Evolved by JARVIS on 2026-09-17 11:28 for: record a 3 second video
+"""Record a short webcam video on command ("record a 10 second video", "take a 5s clip of me").
+
+Goes through the broker's gated camera capability (same privacy rule as photos - it never records from
+a background/agenda task) and remembers the file, so "open it" / "open the video" works afterwards.
+"""
 import re
-import tempfile
-import os
+import time
+from pathlib import Path
 
-SKILL = {'name': 'record_video', 'description': 'Capture a short video from the webcam for a specified duration and save it to a file.', 'triggers': ['\\brecord\\b', '\\bvideo\\b', '\\bseconds?\\b'], 'version': 1, 'origin': 'evolved', 'requires': ['opencv-python']}
+from core.actions import ActionBroker
+
+SKILL = {
+    "name": "record_video",
+    "description": "Record a short webcam video, e.g. 'record a 10 second video of me', 'take a 5s clip'.",
+    "triggers": [
+        r"\brecord\b[^.]*\b(?:video|clip|webcam|footage)\b",
+        r"\b(?:record|take|capture|grab|shoot)\b[^.]*\bvideo\b[^.]*\b(?:of\s+me|of\s+us|myself|webcam)\b",
+        r"\b\d+\s*(?:second|sec|s)\b[^.]*\bvideo\b",
+        r"\bvideo\b[^.]*\b(?:of\s+me|of\s+us|myself|webcam)\b",
+    ],
+    "version": 2,
+    "origin": "builtin",
+}
+_FOLDERS = {"desktop": "Desktop", "documents": "Documents", "downloads": "Downloads",
+            "pictures": "Pictures", "videos": "Videos"}
 
 
-def _parse_duration(request: str) -> int:
-    """Return duration in seconds extracted from the request, default 5."""
-    match = re.search(r"(\d+)\s*seconds?", request, re.IGNORECASE)
-    if match:
-        return int(match.group(1))
-    match = re.search(r"(\d+)\s*s\b", request, re.IGNORECASE)
-    if match:
-        return int(match.group(1))
-    return 5  # fallback default
+def _actions(context):
+    return context.get("actions") or ActionBroker(dry_run=bool(context.get("dry_run")))
+
+
+def _duration(request):
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:second|sec|s)\b", request, re.IGNORECASE)
+    return float(m.group(1)) if m else 5.0
+
+
+def _destination(request):
+    """A file path if the user named one ("...to C:\\...\\clip.mp4" or "...on my desktop"), else None."""
+    path = re.search(r"[A-Za-z]:[\\/][^\"'<>|?*\n]+?\.(?:mp4|avi|mov|mkv)", request, re.IGNORECASE)
+    if path:
+        return Path(path.group(0).strip())
+    for word, folder in _FOLDERS.items():
+        if re.search(rf"\b(?:on|onto|to|in|into)\s+(?:my\s+|the\s+)?{word}\b", request, re.IGNORECASE):
+            return Path.home() / folder / f"JARVIS-vid-{time.strftime('%Y%m%d-%H%M%S')}.mp4"
+    return None
 
 
 def run(request, context):
-    duration = _parse_duration(request)
-    if duration <= 0:
-        return "Please specify a positive number of seconds to record."
-
-    # Create a temporary file for the video
-    tmp_dir = tempfile.gettempdir()
-    video_path = os.path.join(tmp_dir, f"recorded_{duration}s.mp4")
-
-    # Import cv2 lazily; the skill declares it in "requires"
-    import cv2
-
-    # Open default webcam
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        return "Unable to access the webcam."
-
-    # Define video properties
-    fps = 20.0
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
-
-    frames_to_capture = int(fps * duration)
-    captured = 0
-    while captured < frames_to_capture:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        out.write(frame)
-        captured += 1
-
-    # Release resources
-    cap.release()
-    out.release()
-
-    # Notify user and return path
-    context["actions"].notify(
-        f"Video saved to {video_path}", title="Video Recorded"
-    )
-    return f"Recorded a {duration}-second video and saved it to: {video_path}"
+    if re.search(r"\bvideo\s+game\b", request, re.IGNORECASE):
+        return None  # "make a video game" is a build task, not a webcam recording
+    seconds = _duration(request)
+    if context.get("dry_run"):
+        return f"Would record a {int(seconds)}s webcam video."
+    dest = _destination(request)
+    return _actions(context).record_video(str(dest) if dest else None, seconds)

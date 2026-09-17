@@ -471,6 +471,61 @@ class ActionBroker:
 
         return self._gated(req, do, f"Would take a webcam photo to {target}.")
 
+    def record_video(self, path: str | None = None, seconds: float = 5) -> str:
+        """Record a short webcam clip and save it. Gated by 'camera' (same privacy rule as photos)."""
+        seconds = max(1, min(float(seconds or 5), 60))
+        target = Path(path).expanduser() if path else self.pictures_dir / f"JARVIS-vid-{time.strftime('%Y%m%d-%H%M%S')}.mp4"
+        req = ActionRequest("camera", f"Record a {int(seconds)}s webcam video", details=str(target))
+
+        def do():
+            _make_installed_packages_importable()
+            try:
+                import cv2
+            except ImportError:
+                self.install_package("opencv-python-headless")  # gated by 'packages'
+                _make_installed_packages_importable()
+                try:
+                    import cv2
+                except ImportError:
+                    return "I need the 'opencv-python-headless' package for the camera and couldn't load it."
+            cap = cv2.VideoCapture(0, getattr(cv2, "CAP_DSHOW", 0))
+            if not cap or not cap.isOpened():
+                if cap:
+                    cap.release()
+                return "I couldn't open the webcam (is one connected / not in use by another app?)."
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if not fps or fps <= 1 or fps > 120:      # many webcams report 0/garbage: calibrate briefly
+                start = time.monotonic()
+                counted = 0
+                while time.monotonic() - start < 0.5:
+                    if cap.read()[0]:
+                        counted += 1
+                fps = max(10.0, min(counted / 0.5 if counted else 20.0, 30.0))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            writer = cv2.VideoWriter(str(target), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+            if not writer.isOpened():
+                cap.release()
+                return f"Couldn't start the video writer for {target}."
+            deadline = time.monotonic() + seconds
+            frames = 0
+            while time.monotonic() < deadline:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                writer.write(frame)
+                frames += 1
+            cap.release()
+            writer.release()
+            if not frames or not target.exists():
+                return "The webcam opened but returned no video."
+            self._remember_written(target)
+            self.remember_focus("file", target)   # so "open it"/"open the video" finds this clip
+            return f"Video saved to {target}"
+
+        return self._gated(req, do, f"Would record a {int(seconds)}s webcam video to {target}.")
+
     # ---- files --------------------------------------------------------------------------------
 
     def read_file(self, path: str) -> str:

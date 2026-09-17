@@ -127,6 +127,14 @@ class ActionBrokerLiveTests(IsolatedCase):
         with self.assertRaises(Blocked):
             ActionBroker(permissions=perms).capture_camera()
 
+    def test_record_video_is_camera_gated_and_dry_runs(self):
+        # A video from the webcam is as sensitive as a photo: same 'camera' gate, same dry-run behaviour.
+        self.assertIn("Would record a 10s webcam video", ActionBroker(dry_run=True).record_video(seconds=10))
+        perms = PermissionRegistry(self.tmp / "p.json")
+        perms.set("camera", "deny")
+        with self.assertRaises(Blocked):
+            ActionBroker(permissions=perms).record_video()
+
     def test_run_python_launches_the_interpreter(self):
         perms = PermissionRegistry(self.tmp / "p.json")
         perms.set("run_command", "allow")
