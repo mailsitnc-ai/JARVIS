@@ -34,6 +34,26 @@ from pathlib import Path
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _MAX_READ = 200_000
 
+# Runs a .py inside a console that stays open: shows the program's output, or its full traceback if it
+# crashed, then waits for a keypress - so a script that finishes (or errors) doesn't just flash and vanish.
+_HOLD_CONSOLE = (
+    "import runpy,sys,traceback\n"
+    "f=sys.argv[1]\n"
+    "rc=0\n"
+    "try:\n"
+    "    runpy.run_path(f, run_name='__main__')\n"
+    "except SystemExit as e:\n"
+    "    rc=e.code if isinstance(e.code,int) else (0 if e.code is None else 1)\n"
+    "except BaseException:\n"
+    "    traceback.print_exc(); rc=1\n"
+    "    print('\\n--- the program crashed (the error is above) ---')\n"
+    "print('\\n[Finished with exit code %s. Press Enter to close this window...]' % rc)\n"
+    "try:\n"
+    "    input()\n"
+    "except EOFError:\n"
+    "    pass\n"
+)
+
 APPS = {
     "notepad": ("Notepad", ["notepad.exe"]),
     "calculator": ("Calculator", ["calc.exe"]),
@@ -862,7 +882,8 @@ class ActionBroker:
     # ---- commands -----------------------------------------------------------------------------
 
     def run_python(self, path: str) -> str:
-        """Actually RUN a Python file: a .pyw as a windowless GUI, a .py in its own console. Gated run_command."""
+        """Actually RUN a Python file: a .pyw as a windowless GUI, a .py in a console that STAYS OPEN
+        (shows its output, or the full traceback if it crashes, then waits for a keypress). Gated run_command."""
         target = Path(path).expanduser()
         req = ActionRequest("run_command", f"Run {target.name}", details=str(target))
 
@@ -873,13 +894,15 @@ class ActionBroker:
             if target.suffix.lower() == ".pyw":                     # GUI: pythonw, no console
                 pyw = Path(exe).with_name("pythonw.exe")
                 exe = str(pyw) if pyw.exists() else exe
+                args = [exe, str(target)]
                 flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 stdio = subprocess.DEVNULL
-            else:                                                   # script: a fresh console shows its output
+            else:  # script: run inside a wrapper so the window doesn't vanish when the script ends/crashes
+                args = [exe, "-c", _HOLD_CONSOLE, str(target)]
                 flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
                 stdio = None
             try:
-                subprocess.Popen([exe, str(target)], cwd=str(target.parent), creationflags=flags,
+                subprocess.Popen(args, cwd=str(target.parent), creationflags=flags,
                                  stdin=stdio, stdout=stdio, stderr=stdio, close_fds=True)
             except OSError as exc:
                 return f"Couldn't run {target.name}: {exc}"

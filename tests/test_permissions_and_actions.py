@@ -147,6 +147,29 @@ class ActionBrokerLiveTests(IsolatedCase):
         self.assertIn("Running app.py", out)
         self.assertIn("Would run", ActionBroker(dry_run=True).run_python("x.py"))
 
+    def test_run_python_keeps_the_console_open(self):
+        # A .py runs through the hold-console wrapper so it doesn't flash and vanish; a .pyw runs silently.
+        from core.actions import _HOLD_CONSOLE
+        perms = PermissionRegistry(self.tmp / "p.json")
+        perms.set("run_command", "allow")
+        script = self.tmp / "s.py"
+        script.write_text("print('hi')", encoding="utf-8")
+        broker = ActionBroker(permissions=perms)
+        with mock.patch("core.actions.subprocess.Popen") as popen:
+            broker.run_python(str(script))
+        args = popen.call_args[0][0]
+        self.assertIn("-c", args)
+        self.assertIn(_HOLD_CONSOLE, args)
+        self.assertEqual(args[-1], str(script))
+
+        gui = self.tmp / "g.pyw"
+        gui.write_text("import tkinter", encoding="utf-8")
+        with mock.patch("core.actions.subprocess.Popen") as popen:
+            broker.run_python(str(gui))
+        gargs = popen.call_args[0][0]
+        self.assertNotIn("-c", gargs)          # GUI .pyw runs directly, no console wrapper
+        self.assertEqual(gargs[-1], str(gui))
+
     def test_organize_dir_sorts_files_into_type_folders(self):
         perms = PermissionRegistry(self.tmp / "p.json")
         perms.set("write_files", "allow")
