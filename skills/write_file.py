@@ -197,6 +197,24 @@ def _verify_python(name, content, context):
     return content, ""
 
 
+def _python_exe():
+    """The user's python.exe (never pythonw), so a console launcher actually shows a console."""
+    exe = Path(sys.executable)
+    return str(exe.with_name("python.exe")) if exe.name.lower() == "pythonw.exe" else str(exe)
+
+
+def _write_launcher(target, actions):
+    """Write a double-clickable <stem>.bat next to a console app so its window stays open. Returns its name."""
+    bat = target.with_name(target.stem + ".bat")
+    body = ("@echo off\r\n"
+            f'cd /d "{target.parent}"\r\n'
+            f'"{_python_exe()}" "{target.name}"\r\n'
+            "echo.\r\n"
+            "pause\r\n")
+    result = actions.write_file(str(bat), body)
+    return bat.name if result.startswith(("Wrote", "Would")) else None
+
+
 def run(request, context):
     target, name = _target_path(request)
     if target is None:
@@ -214,16 +232,29 @@ def run(request, context):
         return "I couldn't generate the file contents just now."
 
     note = ""
-    if target.suffix.lower() in (".py", ".pyw"):        # generate -> verify it actually runs -> save
+    is_python = target.suffix.lower() in (".py", ".pyw")
+    if is_python:                                       # generate -> verify it actually runs -> save
         content, note = _verify_python(name, content, context)
+        # A GUI app should double-click cleanly with no console: save it as .pyw.
+        if target.suffix.lower() == ".py" and _GUI.search(content):
+            target = target.with_suffix(".pyw")
+            name = target.name
+            note += " (GUI app - saved as .pyw so it runs without a console)"
 
-    result = context["actions"].write_file(str(target), content)
+    actions = context["actions"]
+    launcher = None
+    if is_python and target.suffix.lower() == ".py":   # console app: add a double-click launcher, written
+        launcher = _write_launcher(target, actions)    # BEFORE the app so the app stays the "last file"
+    result = actions.write_file(str(target), content)
     if not result.startswith(("Wrote", "Would")):
         return result  # a Blocked/denied message from the broker
     lines = content.count("\n") + 1
     summary = f"Wrote {name} ({lines} lines) to {target.parent}.{note}"
+    if launcher:
+        summary += f" Double-click {launcher} to run it (the window stays open)."
+    elif target.suffix.lower() == ".pyw":
+        summary += f" Double-click {name} to run it."
     if re.search(r"\b(?:open|run|launch|start|execute)\b", request, re.IGNORECASE):
-        actions = context["actions"]
         opened = (actions.run_python(str(target)) if target.suffix.lower() in (".py", ".pyw")
                   else actions.open_path(str(target)))
         return f"{summary} {opened}"

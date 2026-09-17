@@ -24,16 +24,29 @@ class StubLLM:
 
 class StubActions:
     def __init__(self):
-        self.written = None
+        self.writes = []          # every (path, text) written, in order
         self.installed = []
+        self.ran = []
+
+    @property
+    def written(self):
+        return self.writes[-1] if self.writes else None
 
     def install_package(self, pkg):
         self.installed.append(pkg)
         return f"installed {pkg}"
 
     def write_file(self, path, text):
-        self.written = (path, text)
+        self.writes.append((path, text))
         return f"Wrote {len(text)} characters to {path}."
+
+    def run_python(self, path):
+        self.ran.append(path)
+        return f"Running {path}."
+
+    def open_path(self, path):
+        self.ran.append(path)
+        return f"Opening {path}."
 
 
 class SmokeRunTests(unittest.TestCase):
@@ -86,6 +99,31 @@ class VerifyRepairTests(IsolatedCase):
         ctx = {"llm": llm, "actions": StubActions()}
         _content, note = self.wf._verify_python("bad.py", "print(broken)\n", ctx)
         self.assertIn("still errors", note)
+
+
+class LauncherAndExtensionTests(IsolatedCase):
+    def _run(self, request, replies):
+        reg = SkillRegistry(SKILLS_DIR)
+        reg.reload()
+        actions = StubActions()
+        out = reg.get("write_file").run(request, {"llm": StubLLM(replies), "actions": actions})
+        return out, actions
+
+    def test_console_app_gets_a_bat_launcher_and_the_app_is_the_last_write(self):
+        out, act = self._run("write a python script that prints hi and save it as hi.py",
+                             ["print('hi')\n"])
+        paths = [p for p, _t in act.writes]
+        self.assertTrue(any(p.endswith("hi.bat") for p in paths))   # launcher written
+        self.assertTrue(paths[-1].endswith("hi.py"))                # app written last -> stays "last file"
+        self.assertIn("hi.bat", out)
+
+    def test_gui_app_is_saved_as_pyw_without_a_launcher(self):
+        out, act = self._run("make a tkinter app and save it as app.py",
+                             ["import tkinter\nprint('ok')\n"])
+        paths = [p for p, _t in act.writes]
+        self.assertTrue(any(p.endswith("app.pyw") for p in paths))
+        self.assertFalse(any(p.endswith(".bat") for p in paths))    # GUI needs no console launcher
+        self.assertIn(".pyw", out)
 
 
 class TargetPathTests(unittest.TestCase):
