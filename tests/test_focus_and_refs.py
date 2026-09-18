@@ -89,6 +89,28 @@ class ResolveReferenceTests(IsolatedCase):
             out, changed = resolve_references(phrase, f)
             self.assertFalse(changed, phrase)
 
+    def test_demonstrative_this_is_not_a_reference(self):
+        # "this is a test" - 'this' is a demonstrative subject, not a thing to open.
+        f = self._focus_with(url="https://example.com/x")
+        for phrase in ("this is a test", "send a note - this is fine", "that was great"):
+            out, changed = resolve_references(phrase, f)
+            self.assertFalse(changed, phrase)
+            self.assertEqual(out, phrase)
+
+    def test_message_body_is_left_literal(self):
+        # A send command's body is dictated content: a 'this'/'it' in it must never be rewritten to a URL.
+        f = self._focus_with(url="https://www.google.com/search?q=super+capacitors")
+        for phrase in (
+            "send a whatsapp in the Maa Paa group - @all this is test, nice to meet you",
+            "whatsapp mom saying open it when you get home",
+            "google chat Priya: is it ready? let me know",
+            'text Sam "run it past the team"',
+        ):
+            out, changed = resolve_references(phrase, f)
+            self.assertFalse(changed, phrase)
+            self.assertEqual(out, phrase)
+            self.assertNotIn("google.com", out, phrase)
+
     def test_no_referent_means_no_change(self):
         out, changed = resolve_references("open the photo", Focus(self.tmp))
         self.assertFalse(changed)

@@ -68,6 +68,28 @@ _WHATS_IN = re.compile(r"\bwhat(?:'?s| is| are)\s+(?:in|on|inside)\s+", re.IGNOR
 # An explicit absolute path is already a concrete target - don't touch references around it.
 _ABS_PATH = re.compile(r"[A-Za-z]:[\\/]\S")
 
+# --- literal message body protection -------------------------------------------------------------
+# In a send/compose command the body is literal content the user is dictating ("...saying this is a
+# test"), so a word like "this"/"it" in there must NEVER be rewritten to a focused path/URL.
+_SEND_CMD = re.compile(r"\b(?:whats?app|google\s+chat|chat|\bdm\b|text|message|msg|email|e-?mail|"
+                       r"tweet|post|reply|slack|say|tell|send)\b", re.IGNORECASE)
+_BODY_LEADIN = re.compile(r"(?:\bsaying\b|\bthat\s+says\b|\bwhich\s+says\b|\bthe\s+(?:message|text)\s+is\b|"
+                          r"\b(?:message|text)\s+is\b|:|\s[-–—]\s)", re.IGNORECASE)
+_QUOTE = re.compile(r"[\"“‘]")  # a real opening quote starts a literal body too
+
+
+def _body_start(text: str) -> int:
+    """Index where a literal message body begins (everything from here is dictated content, left as-is),
+    or len(text) when the command isn't a send/compose or gives no body."""
+    if not _SEND_CMD.search(text):
+        return len(text)
+    starts = [len(text)]
+    for rx in (_BODY_LEADIN, _QUOTE):
+        m = rx.search(text)
+        if m:
+            starts.append(m.start())
+    return min(starts)
+
 
 def resolve_references(text: str, focus) -> tuple[str, bool]:
     """Return (possibly-rewritten text, changed?). `focus` is a core.focus.Focus (or anything with the
@@ -84,11 +106,14 @@ def resolve_references(text: str, focus) -> tuple[str, bool]:
 
 def _resolve(text: str, focus) -> tuple[str, bool]:
     changed = False
+    body_at = _body_start(text)  # don't rewrite anything from here on: it's a literal message body
 
     # 1. "the photo" / "that link" / "my file" -> the concrete referent for that slot.
     for pattern, slot, _word in _SLOT_PATTERNS:
         def repl(match):
             nonlocal changed
+            if match.start() >= body_at:
+                return match.group(0)  # inside the dictated message body - leave it alone
             before = text[:match.start()]
             if _CREATE_BEFORE.search(before):
                 return match.group(0)  # "take another picture" - creating, not referring back
@@ -100,7 +125,7 @@ def _resolve(text: str, focus) -> tuple[str, bool]:
         text = pattern.sub(repl, text)
 
     # 2. A bare pronoun ("open it", "run that", "email it to me") in an imperative or a "what's in it"
-    #    question -> the most recent referent. Left untouched everywhere else.
+    #    question -> the most recent referent. Left untouched everywhere else (incl. a message body).
     imperative = _IMPERATIVE.search(text)
     whats_in = _WHATS_IN.search(text)
     if (imperative or whats_in) and _PRONOUN.search(text):
@@ -108,7 +133,7 @@ def _resolve(text: str, focus) -> tuple[str, bool]:
         if referent:
             anchor = imperative.end() if imperative else (whats_in.end() if whats_in else 0)
             m = _PRONOUN.search(text, anchor)
-            if m and not _is_dummy_it(text, m):
+            if m and m.start() < body_at and not _is_dummy_it(text, m):
                 text = text[:m.start()] + _quote(referent) + text[m.end():]
                 changed = True
 
@@ -116,9 +141,14 @@ def _resolve(text: str, focus) -> tuple[str, bool]:
 
 
 def _is_dummy_it(text: str, match) -> bool:
-    """True for a pronoun that isn't a real object, e.g. 'is it', 'it's', so we never rewrite it."""
-    after = text[match.end():match.end() + 3].lower()
-    if after.startswith("'s") or after.startswith("s "):  # "it's ready"
+    """True for a pronoun that isn't a real object we can open, so we never rewrite it. Covers 'is it
+    done', 'it's ready', and a demonstrative subject like 'this is a test' / 'that was fun'."""
+    rest = text[match.end():].lstrip()
+    if rest[:3].lower().startswith(("'s", "'re", "'ll")):  # "it's ready", "they're", "it'll"
+        return True
+    nxt = re.match(r"[a-z']+", rest.lower())
+    if nxt and nxt.group(0) in ("is", "was", "are", "were", "will", "would",
+                                "could", "should", "s", "re", "ll"):  # "this is test", "that was fun"
         return True
     before = text[max(0, match.start() - 6):match.start()].lower()
     return bool(re.search(r"\b(is|was|are|were)\s+$", before))  # "is it done"
