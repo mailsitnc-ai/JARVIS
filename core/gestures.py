@@ -100,6 +100,12 @@ class GestureController:
             if cap:
                 cap.release()
             return
+        gui = True                     # opencv-python-headless has no HighGUI - detect and run without a window
+        try:
+            cv2.namedWindow(_WINDOW, cv2.WINDOW_AUTOSIZE)
+        except cv2.error:
+            gui = False
+            self.emit("gesture", "No preview window (headless OpenCV) - gestures still work; open palm to stop.")
         self.emit("gesture", "Hand control on - 1 down, 2 up (hold to keep scrolling), 3 identify, "
                              "4 screenshot; open palm = stop.")
         last, stable, next_fire, tick = -1, 0, 0.0, 0
@@ -134,10 +140,17 @@ class GestureController:
                         next_fire = now + self.cooldown
                 else:
                     tick = 0
-                self._draw(frame, cv2, (x0, y0, x1, y1), count, label, stable)
-                cv2.imshow(_WINDOW, frame)
-                if (cv2.waitKey(1) & 0xFF) == ord("q") or cv2.getWindowProperty(_WINDOW, cv2.WND_PROP_VISIBLE) < 1:
-                    break
+                if gui:
+                    self._draw(frame, cv2, (x0, y0, x1, y1), count, label, stable)
+                    try:
+                        cv2.imshow(_WINDOW, frame)
+                        if (cv2.waitKey(1) & 0xFF) == ord("q") or \
+                                cv2.getWindowProperty(_WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                            break
+                    except cv2.error:
+                        gui = False          # window died mid-run - keep going headless
+                else:
+                    time.sleep(0.03)         # no waitKey to pace us; ~30fps and easy on the CPU
         except Exception as exc:
             self.error = str(exc)
         finally:

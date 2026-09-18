@@ -468,12 +468,12 @@ class ActionBroker:
             try:
                 import cv2  # noqa: F401
             except ImportError:
-                self.install_package("opencv-python-headless")  # gated by 'packages'
+                self.install_package("opencv-python")  # gated by 'packages' (GUI build - needed for the gesture preview)
                 _make_installed_packages_importable()
                 try:
                     import cv2
                 except ImportError:
-                    return "I need the 'opencv-python-headless' package for the camera and couldn't load it."
+                    return "I need the 'opencv-python' package for the camera and couldn't load it."
             cap = cv2.VideoCapture(0, getattr(cv2, "CAP_DSHOW", 0))  # DirectShow: opens fast on Windows
             if not cap or not cap.isOpened():
                 if cap:
@@ -520,12 +520,12 @@ class ActionBroker:
             try:
                 import cv2
             except ImportError:
-                self.install_package("opencv-python-headless")  # gated by 'packages'
+                self.install_package("opencv-python")  # gated by 'packages' (GUI build - needed for the gesture preview)
                 _make_installed_packages_importable()
                 try:
                     import cv2
                 except ImportError:
-                    return "I need the 'opencv-python-headless' package for the camera and couldn't load it."
+                    return "I need the 'opencv-python' package for the camera and couldn't load it."
             cap = cv2.VideoCapture(0, getattr(cv2, "CAP_DSHOW", 0))
             if not cap or not cap.isOpened():
                 if cap:
