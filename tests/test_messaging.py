@@ -168,6 +168,7 @@ class WhatsAppDeepLinkTests(unittest.TestCase):
         from core.browser import ChromeController
         c = ChromeController()
         c.ensure = lambda: None
+        c._prepare_whatsapp = lambda: None
         navigated = {}
         c.navigate = lambda url, wait=15: navigated.update(url=url)
         c._wait_for = lambda expr, timeout=25: True

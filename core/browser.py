@@ -310,6 +310,21 @@ class ChromeController:
                         "||document.querySelector('div[contenteditable=\"true\"][data-tab=\"3\"]')"
                         "||document.querySelector('div[title=\"Search input textbox\"]'))")
 
+    def _prepare_whatsapp(self) -> None:
+        """WhatsApp Web refuses to boot (hangs on the splash) unless the browser grants it persistent
+        storage - which Chrome denies on a fresh, low-engagement profile. Grant it up front via CDP, and
+        bypass the service worker so a stale/broken SW can't hang the load. Best-effort; never raises."""
+        for method, params in (
+            ("Browser.grantPermissions",
+             {"origin": "https://web.whatsapp.com", "permissions": ["durableStorage", "notifications"]}),
+            ("Network.enable", {}),
+            ("Network.setBypassServiceWorker", {"bypass": True}),
+        ):
+            try:
+                self._cmd(method, params, timeout=6)
+            except BrowserError:
+                pass
+
     def _wa_logged_in(self) -> bool:
         try:
             return bool(self.evaluate(self._WA_LOGGED_IN_JS))
@@ -323,6 +338,7 @@ class ChromeController:
         out on their phone."""
         say = emit or (lambda *a: None)
         self.ensure()
+        self._prepare_whatsapp()
         if not str(self.current_url()).startswith("https://web.whatsapp.com"):
             self.navigate("https://web.whatsapp.com", wait=25)
         if self._wa_logged_in():
@@ -343,6 +359,7 @@ class ChromeController:
         """Send a WhatsApp message via WhatsApp Web. Reliable with a phone number (uses the send deep
         link); name-based search is best-effort. Needs WhatsApp Web logged in (QR scanned) in this Chrome."""
         self.ensure()
+        self._prepare_whatsapp()
         digits = re.sub(r"\D", "", to or "")
         by_phone = bool(digits) and (str(to).strip().startswith("+") or len(digits) >= 8)
         if by_phone:
