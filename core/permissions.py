@@ -33,12 +33,13 @@ CAPABILITIES = {
     "self_edit": "Rewrite JARVIS's own source code",
     "camera": "Use the webcam (only when you ask)",
     "browser": "Control the web browser - read pages, click and type (Chrome DevTools)",
+    "email_send": "Send email from your Gmail (asks every time)",
 }
 STATES = ("ask", "allow", "deny")
 DEFAULT_STATE = "ask"
-# Privacy-sensitive: autonomy does NOT blanket-allow these - they stay at their own setting so the
-# camera never fires from a background/scheduled task, only from an explicit command you approve.
-SENSITIVE = {"camera"}
+# Privacy/safety-sensitive: autonomy does NOT blanket-allow these - they stay at their own setting so the
+# webcam never fires from a background task, and an email is never SENT without an explicit approval.
+SENSITIVE = {"camera", "email_send"}
 
 
 class PermissionRegistry:

@@ -20,9 +20,11 @@ from .config import user_dir, write_json_atomic
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
-# gmail.modify = read + organize (labels, archive, mark read, trash). NOT gmail.send - JARVIS never sends
-# mail, and never permanently deletes (trash is reversible). Drive stays read-only.
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/gmail.modify"]
+# gmail.modify = read + organize (labels, archive, mark read, trash). gmail.send = send new mail (it
+# still never permanently deletes - trash is reversible). Sending is gated by the SENSITIVE 'email_send'
+# capability so it always asks first, even under autonomy. Drive stays read-only.
+SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/gmail.modify",
+          "https://www.googleapis.com/auth/gmail.send"]
 
 
 class GoogleError(RuntimeError):
@@ -252,6 +254,28 @@ class GoogleClient:
         else:
             return f"Unknown Gmail action '{action}'. Use archive, read, trash or label."
         return f"{verb}: {len(ids)} email(s) matching '{query}'."
+
+    def my_address(self) -> str | None:
+        """The signed-in account's own email address (for 'send it to myself')."""
+        try:
+            return self._get("https://gmail.googleapis.com/gmail/v1/users/me/profile").get("emailAddress")
+        except GoogleError:
+            return None
+
+    def gmail_send(self, to: str, subject: str, body: str, cc: str | None = None) -> str:
+        """Send a plain-text email from the signed-in account. Needs the gmail.send scope."""
+        import base64
+        from email.message import EmailMessage
+
+        msg = EmailMessage()
+        msg["To"] = to
+        if cc:
+            msg["Cc"] = cc
+        msg["Subject"] = subject or "(no subject)"
+        msg.set_content(body or "")
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
+        self._post("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {"raw": raw})
+        return to
 
     def search_gmail(self, query: str, limit: int = 5) -> str:
         listing = self._get(f"https://gmail.googleapis.com/gmail/v1/users/me/messages"

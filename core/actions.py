@@ -827,6 +827,41 @@ class ActionBroker:
 
         return self._gated(req, do, f"Would {summary}.")
 
+    def my_gmail_address(self) -> str | None:
+        """The signed-in account's own address (for 'send it to myself'). Read-only, gated by 'google'."""
+        if self.dry_run:
+            return None
+        try:
+            self._decide(ActionRequest("google", "Look up your Gmail address", details=""))
+            from core.google import GoogleAuth, GoogleClient
+            auth = GoogleAuth()
+            return GoogleClient(auth).my_address() if auth.is_connected() else None
+        except Exception:
+            return None
+
+    def gmail_send(self, to: str, subject: str, body: str) -> str:
+        """Send an email from the user's Gmail. Gated by SENSITIVE 'email_send' - always asks first (even
+        under autonomy), showing the recipient, subject and full body. Never permanently deletes anything."""
+        preview = f"To: {to}\nSubject: {subject or '(no subject)'}\n\n{body or ''}"
+        req = ActionRequest("email_send", f"Send an email to {to}", details=preview)
+
+        def do():
+            from core.google import GoogleAuth, GoogleClient, GoogleError
+
+            auth = GoogleAuth()
+            if not auth.is_connected():
+                return "Google isn't connected yet. Run:  jarvis google login"
+            try:
+                GoogleClient(auth).gmail_send(to, subject, body)
+                return f"Sent the email to {to}."
+            except GoogleError as exc:
+                if "insufficient" in str(exc).lower() or "scope" in str(exc).lower() or "403" in str(exc):
+                    return ("I don't have permission to send yet - the send scope was just added. Re-run:  "
+                            "jarvis google login  (then try again).")
+                return f"Couldn't send the email: {exc}"
+
+        return self._gated(req, do, f"Would send an email to {to} (subject: {subject or '(no subject)'}).")
+
     # ---- packages -----------------------------------------------------------------------------
 
     def install_package(self, name: str) -> str:
