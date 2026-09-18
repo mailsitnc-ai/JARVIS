@@ -38,10 +38,10 @@ DEFAULTS: dict[str, Any] = {
             "extra": {"reasoning_effort": "low"},
         },
         "gemini": {
-            # gemini-2.5-flash was retired (404). "gemini-flash-latest" always points at the current flash
-            # (multimodal, for vision). NOTE: needs a Gemini key whose project isn't denied API access -
-            # get one at https://aistudio.google.com/apikey if calls return 403 PERMISSION_DENIED.
-            "model": "gemini-flash-latest",
+            # gemini-2.5-flash: current multimodal flash, used for vision. Verified working 2026-09-18.
+            # "gemini-flash-latest" also works but its alias can 503 under load; the pinned 2.5-flash is
+            # steadier. Needs a valid AI Studio key (get one at https://aistudio.google.com/apikey).
+            "model": "gemini-2.5-flash",
             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
             "extra": {},
         },
