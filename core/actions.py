@@ -494,6 +494,21 @@ class ActionBroker:
 
         return self._gated(req, do, f"Would take a webcam photo to {target}.")
 
+    def start_gesture_control(self, runner, emit=None) -> str:
+        """Begin watching the webcam for hand gestures. Gated by SENSITIVE 'camera' - only from an
+        explicit command you approve, never a background task."""
+        req = ActionRequest("camera", "Watch the webcam for hand gestures", details="hand control")
+
+        def do():
+            from core.gestures import start
+            return start(runner, emit or self.emit)
+
+        return self._gated(req, do, "Would start hand-gesture control.")
+
+    def stop_gesture_control(self) -> str:
+        from core.gestures import stop
+        return stop()
+
     def record_video(self, path: str | None = None, seconds: float = 5) -> str:
         """Record a short webcam clip and save it. Gated by 'camera' (same privacy rule as photos)."""
         seconds = max(1, min(float(seconds or 5), 60))

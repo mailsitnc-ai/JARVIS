@@ -17,13 +17,15 @@ SKILL = {
         r"\b(?:take|snap|capture|grab)\s+(?:a\s+)?(?:photo|picture|pic|selfie|shot|snapshot)\b",
         r"\b(?:web\s?cam|camera)\b",
         r"\bwhat\s+do\s+you\s+see\b",
+        r"\bwhat\s+am\s+i\s+(?:holding|doing|wearing)\b",
+        r"\b(?:identify|recogni[sz]e|tell\s+me)\b[^.\n]*\b(?:holding|in\s+my\s+hand|doing)\b",
         r"\blook\s+(?:through|with|at)\s+(?:the\s+)?(?:camera|webcam)\b",
     ],
     "version": 1,
     "origin": "builtin",
 }
 _DESCRIBE = re.compile(r"\b(?:see|describe|look|who|what'?s|recogni[sz]e|identify|am i|is there|holding|"
-                       r"wearing|in front|visible|reading)\b", re.IGNORECASE)
+                       r"wearing|doing|in front|visible|reading)\b", re.IGNORECASE)
 
 
 def _actions(context):
