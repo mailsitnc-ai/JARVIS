@@ -39,10 +39,17 @@ def _action(low):
     return None
 
 
+_UNIT = {"day": "d", "week": "w", "month": "m", "year": "y"}
+# Where a "from ..." sender phrase ends: at a time clause, an "as/about" clause, or a connector.
+# A period only ends it when followed by space/end (so it never splits an email like noreply@x.com).
+_FROM_STOP = (r"\s+(?:as|about|older|newer|that|which|labell?ed|tagged|and|to|before|after|in\s+the)\b"
+              r"|[,;]|\.(?=\s|$)|$")
+
+
 def _query(request):
     low = request.lower()
     parts = []
-    m = re.search(r"\bfrom\s+(.+?)(?:\s+as\s+|\s+about\s+|$)", request, re.IGNORECASE)
+    m = re.search(rf"\bfrom\s+(.+?)(?:{_FROM_STOP})", request, re.IGNORECASE)
     if m:
         parts.append(f"from:{m.group(1).strip().rstrip('.,;')}")
     for word, q in _CATEGORIES.items():
@@ -52,9 +59,14 @@ def _query(request):
         parts.append("(newsletter OR unsubscribe)")
     if "unread" in low:
         parts.append("is:unread")
-    older = re.search(r"older than\s+(\d+)\s*(day|week|month|year)", low)
-    if older:
-        parts.append(f"older_than:{older.group(1)}{ {'day':'d','week':'w','month':'m','year':'y'}[older.group(2)] }")
+    # "older than / newer than / in the last  N  day|week|month|year(s)"
+    for kind, key in (("older", "older_than"), ("newer", "newer_than")):
+        t = re.search(rf"{kind}\s+than\s+(\d+)\s*(day|week|month|year)", low)
+        if t:
+            parts.append(f"{key}:{t.group(1)}{_UNIT[t.group(2)]}")
+    recent = re.search(r"(?:in\s+the\s+)?last\s+(\d+)\s*(day|week|month|year)", low)
+    if recent and not any(p.startswith("newer_than") for p in parts):
+        parts.append(f"newer_than:{recent.group(1)}{_UNIT[recent.group(2)]}")
     about = re.search(r"\babout\s+(.+?)(?:\s+as\s+|$)", request, re.IGNORECASE)
     if about and not parts:
         parts.append(about.group(1).strip().rstrip(".,;"))
@@ -62,7 +74,8 @@ def _query(request):
 
 
 def _label(request):
-    m = re.search(r"\b(?:as|label(?:led)?|tag(?:ged)?(?:\s+as)?)\s+([\w /&-]+?)\s*$", request, re.IGNORECASE)
+    # The label is the text after the trailing "as / labelled as / tagged as" - never the leading verb.
+    m = re.search(r"\b(?:labell?ed\s+as|tagged\s+as|as)\s+([\w][\w /&+.-]*?)\s*$", request, re.IGNORECASE)
     return m.group(1).strip() if m else None
 
 

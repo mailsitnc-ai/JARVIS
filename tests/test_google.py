@@ -76,6 +76,34 @@ class GoogleClientTests(IsolatedCase):
         self.assertTrue(any(b.get("addLabelIds") == ["Label_9"] for _u, b in calls))
 
 
+class GmailOrganizeParsingTests(unittest.TestCase):
+    def setUp(self):
+        from core.config import SKILLS_DIR
+        from core.skill_loader import SkillRegistry
+        reg = SkillRegistry(SKILLS_DIR)
+        reg.reload()
+        self.m = reg.get("gmail_organize").module
+
+    def test_query_translates_time_and_stops_from_capture(self):
+        self.assertEqual(self.m._query("label emails from noreply newer than 2 days as JARVIS-test"),
+                         "from:noreply newer_than:2d")
+        self.assertEqual(self.m._query("trash emails from noreply older than 60 days"),
+                         "from:noreply older_than:60d")
+        self.assertEqual(self.m._query("mark all promotions as read"), "category:promotions")
+        self.assertEqual(self.m._query("archive emails from noreply@x.com"), "from:noreply@x.com")
+
+    def test_label_is_the_trailing_as_clause_not_the_verb(self):
+        self.assertEqual(self.m._label("label emails from noreply newer than 2 days as JARVIS-test"), "JARVIS-test")
+        self.assertEqual(self.m._label("label emails from boss as Work"), "Work")
+        self.assertIsNone(self.m._label("archive emails from noreply"))
+
+    def test_actions(self):
+        self.assertEqual(self.m._action("archive emails from bob"), "archive")
+        self.assertEqual(self.m._action("trash old emails"), "trash")
+        self.assertEqual(self.m._action("mark promotions as read"), "read")
+        self.assertEqual(self.m._action("label emails as Work"), "label")
+
+
 class GoogleBrokerTests(IsolatedCase):
     def test_not_connected_message(self):
         broker = ActionBroker(permissions=PermissionRegistry(self.tmp / "p.json"), confirm=lambda req: "once")
