@@ -178,8 +178,9 @@ class RoutingTests(IsolatedCase):
         skill = registry.get("open_app")
         # a sentence about a folder/screenshot is not an app name -> decline so another skill handles it
         self.assertIsNone(skill.run("open the folder where the screenshot is saved", {"dry_run": True}))
-        # a plain name we can't find -> say so, don't return None (which would spawn a clone skill)
-        self.assertIn("couldn't find", skill.run("open antigravity", {"dry_run": True}))
+        # a plain one-word name we can't resolve as an app -> open it as a website (never None, which
+        # would spawn a clone skill). Live, an installed app of that name still opens via the Start Menu.
+        self.assertIn("antigravity.com", skill.run("open antigravity", {"dry_run": True}))
 
     def test_multi_step_requests_are_chained(self):
         jarvis = self.make()

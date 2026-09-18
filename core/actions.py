@@ -108,14 +108,35 @@ WEB_APPS = {
     "amazon": "https://www.amazon.com", "netflix": "https://www.netflix.com",
     "stack overflow": "https://stackoverflow.com", "stackoverflow": "https://stackoverflow.com",
 }
-# "on/in (my) (existing) chrome/edge/firefox/browser" is noise for what to open. Strip just that phrase,
-# not whatever follows it (so a later clause like "... and find X" is preserved for the planner).
-_BROWSER_SUFFIX = re.compile(r"\s+(?:on|in|using|with|via)\s+(?:my\s+|the\s+|an?\s+|existing\s+)*"
-                             r"(?:google\s+chrome|microsoft\s+edge|chrome|edge|firefox|browser)\b", re.IGNORECASE)
+# "on/in (my current/existing) chrome/edge/firefox/browser (window/tab)" is noise for what to open.
+# Strip just that phrase, not whatever follows it (so a later clause like "... and find X" is kept for
+# the planner). The determiner list is generous ("my current", "the same", "a new") so the user can
+# phrase it naturally instead of matching an exact form.
+_BROWSER_SUFFIX = re.compile(
+    r"\s+(?:on|in|using|with|via|to)\s+"
+    r"(?:(?:my|the|an?|this|that|existing|current|open|already[\s-]?open|same|new)\s+){0,3}"
+    r"(?:google\s+chrome|microsoft\s+edge|chrome|edge|firefox|brave|browser)"
+    r"(?:\s+(?:window|tab))?\b",
+    re.IGNORECASE)
 
 
 def strip_browser_suffix(text: str) -> str:
     return _BROWSER_SUFFIX.sub("", str(text)).strip()
+
+
+_SITE_GUESS = re.compile(r"[a-z0-9][a-z0-9-]{1,30}", re.IGNORECASE)
+
+
+def guess_site_url(name: str) -> str | None:
+    """A bare, unknown one-word target ("toddle", "todoist", "canva") is almost always a website the
+    user wants opened, so guess <name>.com. Only for a single clean brand-like token that isn't a
+    local filename; anything with a space, slash, dot or file extension returns None (handled elsewhere)."""
+    cleaned = strip_browser_suffix(str(name)).strip().strip(".!?").lower()
+    if not cleaned or any(ch in cleaned for ch in " \t/\\.") or has_local_file_ext(cleaned):
+        return None
+    if not _SITE_GUESS.fullmatch(cleaned):
+        return None
+    return f"https://{cleaned}.com"
 
 
 def _make_installed_packages_importable() -> None:
@@ -328,6 +349,8 @@ class ActionBroker:
         resolved = self._resolve_app(name)
         if not resolved:
             url = web_url_for(name)  # google docs, gmail, youtube, a bare domain...
+            if url is None:
+                url = guess_site_url(name)  # "open toddle" -> https://toddle.com (unknown one-word name)
             return self.open_url(url) if url else None
         label, candidates = resolved
         req = ActionRequest("open", f"Open {label}", details=candidates[0])

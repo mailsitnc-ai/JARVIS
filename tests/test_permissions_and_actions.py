@@ -78,6 +78,33 @@ class ActionBrokerDryTests(IsolatedCase):
         self.assertEqual(len(broker.simulated), 6)
 
 
+class OpenTargetTests(IsolatedCase):
+    def test_unknown_one_word_target_opens_as_a_website(self):
+        broker = ActionBroker(dry_run=True)
+        self.assertEqual(broker.open_app("toddle"),
+                         "Would open https://toddle.com in your browser.")
+        self.assertEqual(broker.open_app("todoist"),
+                         "Would open https://todoist.com in your browser.")
+
+    def test_browser_suffix_is_stripped_generously(self):
+        from core.actions import strip_browser_suffix
+        self.assertEqual(strip_browser_suffix("toddle on my current chrome window"), "toddle")
+        self.assertEqual(strip_browser_suffix("google docs in the same browser tab"), "google docs")
+        self.assertEqual(strip_browser_suffix("notion in my chrome"), "notion")
+
+    def test_guess_is_only_for_clean_single_tokens(self):
+        from core.actions import guess_site_url
+        self.assertIsNone(guess_site_url("some random phrase"))
+        self.assertIsNone(guess_site_url("notes.txt"))
+        self.assertIsNone(guess_site_url("C:\\path\\thing"))
+
+    def test_known_apps_and_domains_are_unaffected(self):
+        broker = ActionBroker(dry_run=True)
+        self.assertEqual(broker.open_app("notepad"), "Would open Notepad.")
+        self.assertEqual(broker.open_app("github.com"),
+                         "Would open https://github.com in your browser.")
+
+
 class ActionBrokerLiveTests(IsolatedCase):
     def broker(self, confirm=None):
         return ActionBroker(dry_run=False, permissions=PermissionRegistry(self.tmp / "p.json"), confirm=confirm)
