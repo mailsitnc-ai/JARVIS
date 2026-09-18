@@ -44,6 +44,16 @@ _FILLER = re.compile(r"^(?:and\s+|then\s+|also\s+|next\s+|after\s+that\s+|please
 CHAT_SYSTEM = ("You are JARVIS, a concise, friendly assistant running on the user's Windows PC. "
                "Chat naturally and briefly. If the user seems to want a task done, offer to do it.")
 
+# A messaging command whose body has commas ("...saying hi, everyone") must NOT be treated as a
+# multi-step chain or handed to evolution - it goes straight to the whatsapp/google_chat skill. We
+# recognise it by a channel word AND a message-body lead-in, so a mere mention ("search whatsapp
+# help") doesn't get hijacked.
+_MSG_CHANNEL = re.compile(r"\bwhats?app\b|\bwhat'?s\s?app\b|\bgoogle\s+chat\b|\bon\s+(?:google\s+)?chat\b|"
+                          r"\bchat\s+(?:to|message)\b", re.IGNORECASE)
+_MSG_BODY = re.compile(r"\bsaying\b|\bthat\s+says\b|\bthe\s+(?:message|text)\s+is\b|:|\s[-–—]\s|"
+                       r"[\"“]", re.IGNORECASE)
+_MSG_SKILLS = ("whatsapp", "google_chat")
+
 # "improve/upgrade/fix your <name> skill": rewrite an existing evolved skill rather than build a new one.
 _IMPROVE_VERB = re.compile(r"\b(improve|upgrade|enhance|optimi[sz]e|refine|rewrite|fix|make\s+\w+\s+better|better)\b",
                            re.IGNORECASE)
@@ -212,7 +222,20 @@ class Jarvis:
         request = self._resolve_refs(request)
         if _SELF_EDIT.search(request) or self._improve_target(request) is not None:
             return None  # "rewrite your own code" / "improve your X skill" -> the (backgroundable) build path
+        direct = self._direct_message_route(request)  # explicit whatsapp/chat send -> the real skill, always
+        if direct is not None:
+            return direct
         return self._fast_cloud(request) if self._use_planner() else self._fast_local(request)
+
+    def _direct_message_route(self, request: str):
+        """An explicit WhatsApp/Google Chat send goes straight to the messaging skill, bypassing the
+        multi-step splitter and evolution - its body legitimately contains commas/'and'/'saying'."""
+        if not (_MSG_CHANNEL.search(request) and _MSG_BODY.search(request)):
+            return None
+        cands = [s for s in self.candidates(request) if s.name in _MSG_SKILLS]
+        if not cands:
+            return None
+        return self._try_skills(cands, request, "trigger")
 
     def _fast_cloud(self, request: str):
         """A capable model is available: rules handle the obvious instant cases, the model understands the rest."""

@@ -46,6 +46,20 @@ class RoutingTests(IsolatedCase):
         self.assertEqual(jarvis.route("what time is it")[0].name, "current_time")
         self.assertEqual(jarvis.route("how much ram is free")[0].name, "system_status")
 
+    def test_whatsapp_command_with_commas_routes_to_the_real_skill(self):
+        # A body with commas used to be split as a multi-step chain and sent to evolution (which built a
+        # bogus 'send_chat_message'). It must go straight to the whatsapp skill instead.
+        jarvis = self.make()
+        reply = jarvis.handle(
+            "send a whatsapp in the Maa Paa group - @all this is test, I am JARVIS, nice to meet you")
+        self.assertEqual(reply.skill, "whatsapp")
+        self.assertNotIn(reply.route, ("evolved", "reused"))
+
+    def test_mere_mention_of_whatsapp_is_not_hijacked(self):
+        # "search whatsapp help..." has no message body, so it must NOT be force-routed to whatsapp.
+        jarvis = self.make()
+        self.assertIsNone(jarvis._direct_message_route("search whatsapp help for stickers"))
+
     def test_unhandled_request_with_evolution_off(self):
         os.environ["JARVIS_EVOLUTION__ENABLED"] = "false"
         jarvis = self.make()
