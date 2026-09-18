@@ -164,6 +164,7 @@ class ChromeController:
         profile = self.profile_dir or str(Path(os.environ.get("APPDATA", str(Path.home()))) / "JARVIS" / "chrome-debug")
         Path(profile).mkdir(parents=True, exist_ok=True)
         args = [exe, f"--remote-debugging-port={self.port}", f"--user-data-dir={profile}",
+                "--remote-allow-origins=*",  # newer Chrome blocks DevTools websockets otherwise
                 "--no-first-run", "--no-default-browser-check", "--start-maximized", "about:blank"]
         try:
             subprocess.Popen(args, creationflags=_NO_WINDOW, close_fds=True)
@@ -214,8 +215,10 @@ class ChromeController:
             return self._ws
         websocket = self._import_ws()
         target = self._page_target()
+        # suppress_origin: recent Chrome 403-rejects a DevTools websocket that carries an Origin header
+        # ("Rejected an incoming WebSocket connection from the ... origin"). DevTools clients send none.
         self._ws = websocket.create_connection(target["webSocketDebuggerUrl"], timeout=20,
-                                                max_size=None, enable_multithread=True)
+                                                max_size=None, enable_multithread=True, suppress_origin=True)
         self._msg_id = 0
         return self._ws
 
