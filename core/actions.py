@@ -616,6 +616,25 @@ class ActionBroker:
         return self._browser_action("Run JavaScript on the page", expression[:120], work,
                                     "Would run JavaScript on the page.")
 
+    def send_message(self, app: str, to: str, message: str) -> str:
+        """Send a chat message (WhatsApp / Google Chat) by driving the web app in JARVIS's Chrome. Gated by
+        SENSITIVE 'message_send' - always asks first, showing the app, recipient and full message."""
+        label = {"whatsapp": "WhatsApp", "chat": "Google Chat", "google_chat": "Google Chat"}.get(app, app)
+        preview = f"{label} to {to}:\n\n{message}"
+        req = ActionRequest("message_send", f"Send a {label} message to {to}", details=preview)
+
+        def do():
+            from core.browser import BrowserError
+            try:
+                controller = self._browser()
+                if app == "whatsapp":
+                    return controller.whatsapp_send(to, message)
+                return controller.chat_send(to, message)
+            except BrowserError as exc:
+                return f"Couldn't send the {label} message: {exc}"
+
+        return self._gated(req, do, f"Would send a {label} message to {to}.")
+
     def browser_screenshot(self, path: str | None = None) -> str:
         target = Path(path).expanduser() if path else self.pictures_dir / f"JARVIS-page-{time.strftime('%Y%m%d-%H%M%S')}.png"
 

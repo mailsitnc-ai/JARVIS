@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -64,6 +66,49 @@ _SUBMIT_JS = r"""
 
 class BrowserError(RuntimeError):
     pass
+
+
+# --- best-effort DOM scripts for web apps that have no personal send API (they can break if the site
+#     changes its markup; the fix_code / browser tools can be used to adjust the selectors). ---
+_WA_SEARCH_JS =("(function(q){var el=document.querySelector('div[contenteditable=\"true\"][data-tab=\"3\"]')"
+                 "||document.querySelector('div[title=\"Search input textbox\"]')"
+                 "||document.querySelector('div[contenteditable=\"true\"]');"
+                 "if(!el)return false;el.focus();"
+                 "document.execCommand&&document.execCommand('insertText',false,q);"
+                 "el.dispatchEvent(new InputEvent('input',{bubbles:true}));return true;})(%s)")
+_WA_OPEN_FIRST_JS = ("(function(){var r=document.querySelector('div[role=\"listitem\"]')"
+                     "||document.querySelector('#pane-side div[role=\"row\"]');"
+                     "if(r){r.click();return true;}return false;})()")
+_WA_TYPE_JS = ("(function(m){var el=document.querySelector('div[contenteditable=\"true\"][data-tab=\"10\"]')"
+               "||document.querySelector('footer div[contenteditable=\"true\"]');"
+               "if(!el)return false;el.focus();"
+               "document.execCommand&&document.execCommand('insertText',false,m);"
+               "el.dispatchEvent(new InputEvent('input',{bubbles:true}));return true;})(%s)")
+_WA_SEND_READY_JS = ("!!(document.querySelector('button[aria-label=\"Send\"]')"
+                     "||document.querySelector('span[data-icon=\"send\"]'))")
+_WA_CLICK_SEND_JS = ("(function(){var b=document.querySelector('button[aria-label=\"Send\"]')"
+                     "||document.querySelector('span[data-icon=\"send\"]');"
+                     "if(!b)return false;(b.closest('button')||b).click();return true;})()")
+
+_GC_SEARCH_JS = ("(function(q){var el=document.querySelector('input[aria-label*=\"Search\" i]')"
+                 "||document.querySelector('[role=textbox]')||document.querySelector('input');"
+                 "if(!el)return false;el.focus();"
+                 "var set=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');"
+                 "if(set&&set.set&&el.tagName==='INPUT'){set.set.call(el,q);}else{el.textContent=q;}"
+                 "el.dispatchEvent(new Event('input',{bubbles:true}));return true;})(%s)")
+_GC_OPEN_FIRST_JS = ("(function(){var r=document.querySelector('[role=option]')"
+                     "||document.querySelector('[role=listbox] [role=option]')"
+                     "||document.querySelector('[data-member-id]');if(r){r.click();return true;}return false;})()")
+_GC_TYPE_JS = ("(function(m){var el=document.querySelector('[contenteditable=true][role=textbox]')"
+               "||document.querySelector('div[aria-label*=\"Type\" i] [contenteditable=true]')"
+               "||document.querySelector('[contenteditable=true]');if(!el)return false;el.focus();"
+               "document.execCommand&&document.execCommand('insertText',false,m);"
+               "el.dispatchEvent(new InputEvent('input',{bubbles:true}));return true;})(%s)")
+_GC_SEND_JS = ("(function(){var b=document.querySelector('button[aria-label*=\"Send\" i]');"
+               "if(b){b.click();return true;}var el=document.querySelector('[contenteditable=true][role=textbox]')"
+               "||document.querySelector('[contenteditable=true]');if(!el)return false;"
+               "['keydown','keypress','keyup'].forEach(function(t){el.dispatchEvent(new KeyboardEvent(t,"
+               "{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));});return true;})()")
 
 
 class ChromeController:
@@ -244,6 +289,62 @@ class ChromeController:
         if ok and submit:
             self.evaluate(_SUBMIT_JS % json.dumps(selector))
         return ok
+
+    def _wait_for(self, expression: str, timeout: float = 25) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if self.evaluate(expression):
+                    return True
+            except BrowserError:
+                pass
+            time.sleep(0.5)
+        return False
+
+    # ---- messaging (best-effort DOM automation of web apps) -----------------------------------
+
+    def whatsapp_send(self, to: str, message: str) -> str:
+        """Send a WhatsApp message via WhatsApp Web. Reliable with a phone number (uses the send deep
+        link); name-based search is best-effort. Needs WhatsApp Web logged in (QR scanned) in this Chrome."""
+        self.ensure()
+        digits = re.sub(r"\D", "", to or "")
+        by_phone = bool(digits) and (str(to).strip().startswith("+") or len(digits) >= 8)
+        if by_phone:
+            self.navigate(f"https://web.whatsapp.com/send?phone={digits}&text={urllib.parse.quote(message)}", wait=30)
+        else:
+            self.navigate("https://web.whatsapp.com", wait=30)
+            if not self._wait_for("!!document.querySelector('div[contenteditable=\"true\"]')", 45):
+                return "WhatsApp Web isn't ready - open JARVIS's Chrome and scan the WhatsApp QR once, then retry."
+            self.evaluate(_WA_SEARCH_JS % json.dumps(to))
+            time.sleep(1.8)
+            if not self.evaluate(_WA_OPEN_FIRST_JS):
+                return f"I couldn't find a WhatsApp chat for '{to}'. Try giving the phone number instead."
+            time.sleep(1.2)
+            self.evaluate(_WA_TYPE_JS % json.dumps(message))
+        if not self._wait_for(_WA_SEND_READY_JS, 30):
+            return "WhatsApp Web didn't get ready to send (not logged in, or the page changed)."
+        time.sleep(0.5)
+        return (f"Sent the WhatsApp message to {to}." if self.evaluate(_WA_CLICK_SEND_JS)
+                else "I opened the chat but couldn't click Send - WhatsApp Web may have changed its layout.")
+
+    def chat_send(self, to: str, message: str) -> str:
+        """Send a Google Chat message via chat.google.com. Best-effort DOM automation; needs Chat signed
+        in in this Chrome. Consumer Chat has no send API, so this drives the web UI."""
+        self.ensure()
+        self.navigate("https://chat.google.com", wait=30)
+        if not self._wait_for("!!document.querySelector('[role=textbox],[contenteditable=true],input')", 45):
+            return "Google Chat isn't ready - open JARVIS's Chrome and sign in to chat.google.com once, then retry."
+        self.evaluate(_GC_SEARCH_JS % json.dumps(to))
+        time.sleep(1.8)
+        self.evaluate(_GC_OPEN_FIRST_JS)
+        time.sleep(1.8)
+        if not self._wait_for("!!document.querySelector('[contenteditable=true][role=textbox],div[aria-label*=\"Type\"] [contenteditable=true]')", 20):
+            return f"I couldn't open a Google Chat conversation for '{to}'."
+        if not self.evaluate(_GC_TYPE_JS % json.dumps(message)):
+            return "I opened Chat but couldn't find the message box (the layout may have changed)."
+        time.sleep(0.4)
+        self.evaluate(_GC_SEND_JS)
+        return f"Sent the Google Chat message to {to}."
 
     def screenshot(self, path: str) -> str:
         self._cmd("Page.enable")

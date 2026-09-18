@@ -34,12 +34,13 @@ CAPABILITIES = {
     "camera": "Use the webcam (only when you ask)",
     "browser": "Control the web browser - read pages, click and type (Chrome DevTools)",
     "email_send": "Send email from your Gmail (asks every time)",
+    "message_send": "Send chat messages (WhatsApp / Google Chat) on your behalf (asks every time)",
 }
 STATES = ("ask", "allow", "deny")
 DEFAULT_STATE = "ask"
 # Privacy/safety-sensitive: autonomy does NOT blanket-allow these - they stay at their own setting so the
-# webcam never fires from a background task, and an email is never SENT without an explicit approval.
-SENSITIVE = {"camera", "email_send"}
+# webcam never fires from a background task, and a message is never SENT without an explicit approval.
+SENSITIVE = {"camera", "email_send", "message_send"}
 
 
 class PermissionRegistry:
