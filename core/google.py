@@ -215,6 +215,69 @@ class GoogleClient:
         except (urllib.error.URLError, OSError) as exc:
             raise GoogleError(str(getattr(exc, "reason", exc))) from exc
 
+    def _send(self, method: str, url: str, body: dict) -> dict:
+        token = self.auth.access_token()
+        if not token:
+            raise GoogleError("not connected to Google")
+        request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method=method,
+                                         headers={"Authorization": f"Bearer {token}",
+                                                  "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=25) as resp:
+                raw = resp.read().decode("utf-8")
+                return json.loads(raw) if raw.strip() else {}
+        except urllib.error.HTTPError as exc:
+            raise GoogleError(f"HTTP {exc.code}: {exc.read(300).decode('utf-8', 'replace')}") from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise GoogleError(str(getattr(exc, "reason", exc))) from exc
+
+    # ---- Google Sheets ------------------------------------------------------------------------
+
+    def search_sheets(self, query: str, limit: int = 5) -> str:
+        files = self._find_files(query, SHEETS_MIME, limit)
+        if not files:
+            return f"No Google Sheets matching '{query}'."
+        lines = [f"- {f.get('name', '(untitled)')}  {f.get('webViewLink', '')}".rstrip() for f in files]
+        return f"Found {len(files)} Google Sheet(s) for '{query}':\n" + "\n".join(lines)
+
+    def read_sheet(self, name_or_id: str, cell_range: str = "A1:Z50") -> str:
+        sid = self._resolve_id(name_or_id, SHEETS_MIME)
+        if not sid:
+            return f"I couldn't find a Google Sheet called '{name_or_id}'."
+        url = f"https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/{urllib.parse.quote(cell_range)}"
+        rows = self._get(url).get("values", [])
+        if not rows:
+            return f"'{name_or_id}' has no data in {cell_range}."
+        widths = [max(len(str(r[i])) if i < len(r) else 0 for r in rows) for i in range(max(len(r) for r in rows))]
+        out = [" | ".join(str(r[i] if i < len(r) else "").ljust(widths[i]) for i in range(len(widths))) for r in rows]
+        return f"{name_or_id} ({cell_range}):\n" + "\n".join(out[:50])
+
+    def create_sheet(self, title: str) -> str:
+        result = self._post("https://sheets.googleapis.com/v4/spreadsheets", {"properties": {"title": title or "Untitled"}})
+        sid = result.get("spreadsheetId")
+        if not sid:
+            raise GoogleError("couldn't create the spreadsheet")
+        return f"https://docs.google.com/spreadsheets/d/{sid}/edit"
+
+    def write_sheet(self, name_or_id: str, cell_range: str, values: list) -> str:
+        sid = self._resolve_id(name_or_id, SHEETS_MIME)
+        if not sid:
+            return f"I couldn't find a Google Sheet called '{name_or_id}'."
+        url = (f"https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/{urllib.parse.quote(cell_range)}"
+               "?valueInputOption=USER_ENTERED")
+        res = self._send("PUT", url, {"values": values})
+        return f"Updated {res.get('updatedCells', 0)} cell(s) in '{name_or_id}'."
+
+    def append_row(self, name_or_id: str, values: list) -> str:
+        sid = self._resolve_id(name_or_id, SHEETS_MIME)
+        if not sid:
+            return f"I couldn't find a Google Sheet called '{name_or_id}'."
+        url = (f"https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/A1:append"
+               "?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS")
+        row = values if values and isinstance(values[0], list) else [values]
+        self._send("POST", url, {"values": row})
+        return f"Added a row to '{name_or_id}'."
+
     def _get_text(self, url: str) -> str:
         token = self.auth.access_token()
         if not token:

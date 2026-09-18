@@ -162,6 +162,58 @@ class GoogleDocsSkillTests(IsolatedCase):
         self.assertIn("This is the end", calls["text"])
 
 
+class SheetsClientTests(unittest.TestCase):
+    def test_read_sheet_formats_a_grid(self):
+        from core.google import GoogleClient
+        c = GoogleClient.__new__(GoogleClient)
+        c._resolve_id = lambda n, m: "SID"
+        c._get = lambda url: {"values": [["Item", "Cost"], ["Coffee", "4.50"]]}
+        out = c.read_sheet("Budget")
+        self.assertIn("Item", out)
+        self.assertIn("Coffee", out)
+
+    def test_append_row_posts_values(self):
+        from core.google import GoogleClient
+        calls = {}
+        c = GoogleClient.__new__(GoogleClient)
+        c._resolve_id = lambda n, m: "SID"
+        c._send = lambda method, url, body: calls.update(method=method, body=body) or {}
+        out = c.append_row("Expenses", ["Coffee", "4.50"])
+        self.assertEqual(calls["method"], "POST")
+        self.assertEqual(calls["body"], {"values": [["Coffee", "4.50"]]})
+        self.assertIn("Added a row", out)
+
+
+class GoogleSheetsSkillTests(IsolatedCase):
+    def setUp(self):
+        super().setUp()
+        from core.config import SKILLS_DIR
+        from core.skill_loader import SkillRegistry
+        reg = SkillRegistry(SKILLS_DIR)
+        reg.reload()
+        self.skill = reg.get("google_sheets")
+
+    def test_append_dispatch(self):
+        calls = {}
+        actions = type("A", (), {"append_row": lambda self, n, v: calls.update(n=n, v=v) or "ok"})()
+        self.skill.run("add a row to sheet Expenses: Coffee, 4.50", {"actions": actions})
+        self.assertEqual(calls["n"], "Expenses")
+        self.assertEqual(calls["v"], ["Coffee", "4.50"])
+
+    def test_set_cell_dispatch(self):
+        calls = {}
+        actions = type("A", (), {"write_sheet": lambda self, n, r, v: calls.update(n=n, r=r, v=v) or "ok"})()
+        self.skill.run("set A1 in sheet Log to Done", {"actions": actions})
+        self.assertEqual(calls["r"], "A1")
+        self.assertEqual(calls["v"], [["Done"]])
+
+    def test_read_dispatch(self):
+        calls = {}
+        actions = type("A", (), {"read_sheet": lambda self, n, r="A1:Z50": calls.update(n=n, r=r) or "ok"})()
+        self.skill.run("read my sheet Budget", {"actions": actions})
+        self.assertEqual(calls["n"], "Budget")
+
+
 class GoogleBrokerTests(IsolatedCase):
     def test_not_connected_message(self):
         broker = ActionBroker(permissions=PermissionRegistry(self.tmp / "p.json"), confirm=lambda req: "once")

@@ -869,6 +869,50 @@ class ActionBroker:
 
         return self._gated(req, do, f"Would add text to the Google Doc '{name}'.")
 
+    def search_sheets(self, query: str) -> str:
+        return self._google_read(f"Search your Google Sheets for '{query}'", "search_sheets", query)
+
+    def read_sheet(self, name: str, cell_range: str = "A1:Z50") -> str:
+        req = ActionRequest("google", f"Read the Google Sheet '{name}' ({cell_range})", details=cell_range)
+
+        def do():
+            from core.google import GoogleAuth, GoogleClient, GoogleError
+            auth = GoogleAuth()
+            if not auth.is_connected():
+                return "Google isn't connected yet. Run:  jarvis google login"
+            try:
+                return GoogleClient(auth).read_sheet(name, cell_range)
+            except GoogleError as exc:
+                return f"Couldn't read the sheet: {exc}"
+
+        return self._gated(req, do, "[Google unavailable during verification]")
+
+    def _sheet_write(self, summary, method, *args):
+        req = ActionRequest("google", summary, details="")
+
+        def do():
+            from core.google import GoogleAuth, GoogleClient, GoogleError
+            auth = GoogleAuth()
+            if not auth.is_connected():
+                return "Google isn't connected yet. Run:  jarvis google login"
+            try:
+                return getattr(GoogleClient(auth), method)(*args)
+            except GoogleError as exc:
+                if any(s in str(exc).lower() for s in ("insufficient", "scope", "403")):
+                    return "I need the Sheets permission - re-run:  jarvis google login  (then try again)."
+                return f"Couldn't update the sheet: {exc}"
+
+        return self._gated(req, do, f"Would {summary}.")
+
+    def create_sheet(self, title: str) -> str:
+        return self._sheet_write(f"create a Google Sheet '{title}'", "create_sheet", title)
+
+    def write_sheet(self, name: str, cell_range: str, values: list) -> str:
+        return self._sheet_write(f"write to '{name}' {cell_range}", "write_sheet", name, cell_range, values)
+
+    def append_row(self, name: str, values: list) -> str:
+        return self._sheet_write(f"add a row to '{name}'", "append_row", name, values)
+
     def my_gmail_address(self) -> str | None:
         """The signed-in account's own address (for 'send it to myself'). Read-only, gated by 'google'."""
         if self.dry_run:
