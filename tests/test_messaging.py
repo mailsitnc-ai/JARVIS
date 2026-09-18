@@ -77,7 +77,66 @@ class ParseTests(IsolatedCase):
 
     def test_missing_message_asks(self):
         out = _skill("whatsapp").run("whatsapp Alex", {"actions": StubActions()})
-        self.assertIn("What should I say", out)
+        self.assertIn("What should I send", out)
+
+    def test_whatsapp_group_and_dash_body(self):
+        act = StubActions()
+        _skill("whatsapp").run(
+            'send a whatsapp in the Maa Paa group - @all standup at 10, be there', {"actions": act})
+        self.assertEqual(act.sent["to"], "Maa Paa")
+        self.assertEqual(act.sent["message"], "@all standup at 10, be there")
+
+    def test_whatsapp_the_x_group_form(self):
+        act = StubActions()
+        _skill("whatsapp").run("whatsapp the family group saying dinner's ready", {"actions": act})
+        self.assertEqual(act.sent["to"], "family")
+        self.assertEqual(act.sent["message"], "dinner's ready")
+
+    def test_whatsapp_quoted_body(self):
+        act = StubActions()
+        _skill("whatsapp").run('text Priya "see you at 6"', {"actions": act})
+        self.assertEqual(act.sent["to"], "Priya")
+        self.assertEqual(act.sent["message"], "see you at 6")
+
+    def test_google_chat_space(self):
+        act = StubActions()
+        _skill("google_chat").run("message the Design space on chat: shipping today", {"actions": act})
+        self.assertEqual(act.sent["to"], "Design")
+        self.assertEqual(act.sent["message"], "shipping today")
+
+
+class ParserUnitTests(unittest.TestCase):
+    def test_group_in_phrasing(self):
+        from core.messaging import parse_message_command
+        to, is_group, msg = parse_message_command(
+            "send this message via whatsapp in the Maa Paa group - hello everyone")
+        self.assertEqual((to, is_group, msg), ("Maa Paa", True, "hello everyone"))
+
+    def test_plain_name(self):
+        from core.messaging import parse_message_command
+        to, is_group, msg = parse_message_command("whatsapp mom saying I'll be late")
+        self.assertEqual((to, is_group, msg), ("mom", False, "I'll be late"))
+
+    def test_phone_kept_only_with_allow_phone(self):
+        from core.messaging import parse_message_command
+        self.assertEqual(parse_message_command("whatsapp +1 415 555 1234 saying hi")[0], "+14155551234")
+
+
+class RoutingHazardTests(IsolatedCase):
+    def test_speak_text_does_not_hijack_a_messaging_command(self):
+        """The messaging command must NOT match speak_text (its old \\bsaying\\b trigger did)."""
+        reg = SkillRegistry(SKILLS_DIR)
+        reg.reload()
+        names = {s.name for s, _ in reg.match("whatsapp the Maa Paa group saying @all hello")}
+        self.assertIn("whatsapp", names)
+        self.assertNotIn("speak_text", names)
+
+    def test_speak_text_still_triggers_on_real_tts(self):
+        reg = SkillRegistry(SKILLS_DIR)
+        reg.reload()
+        for cmd in ("say hello out loud", "speak this: meeting at noon", "saying good morning"):
+            names = {s.name for s, _ in reg.match(cmd)}
+            self.assertIn("speak_text", names, cmd)
 
 
 class WhatsAppDeepLinkTests(unittest.TestCase):

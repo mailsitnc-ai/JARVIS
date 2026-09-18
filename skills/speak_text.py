@@ -1,7 +1,20 @@
 # Evolved by JARVIS on 2026-09-15 11:43 for: saying ma fave aussie ken barbie doll
 import re
 
-SKILL = {'name': 'speak_text', 'description': 'Speak a given phrase aloud using the system TTS engine.', 'triggers': ['\\bsaying\\b'], 'version': 1, 'origin': 'evolved'}
+# Triggers must fire ONLY on a genuine "speak aloud" request. The original bare '\bsaying\b' was far
+# too greedy - it hijacked messaging commands like "whatsapp the group saying X" (turning them into
+# text-to-speech) - so it now needs the command to start with say/speak/saying, or an explicit
+# aloud/out-loud/text-to-speech cue.
+SKILL = {'name': 'speak_text',
+         'description': 'Read a phrase aloud through the system TTS voice, e.g. "say hello out loud" '
+                        'or "speak this: meeting at noon".',
+         'triggers': [
+             r"^\s*(?:say|speak|saying)\b",
+             r"\b(?:say|read|speak)\b[^.\n]*\b(?:aloud|out\s+loud)\b",
+             r"\bspeak\s+(?:this|that|it|the\s+following)\b",
+             r"\btext[-\s]?to[-\s]?speech\b",
+         ],
+         'version': 2, 'origin': 'evolved'}
 
 def _build_powershell_command(text: str) -> list:
     # Escape single quotes for PowerShell string literal
