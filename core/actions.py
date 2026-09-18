@@ -827,6 +827,48 @@ class ActionBroker:
 
         return self._gated(req, do, f"Would {summary}.")
 
+    def search_docs(self, query: str) -> str:
+        return self._google_read(f"Search your Google Docs for '{query}'", "search_docs", query)
+
+    def read_doc(self, name: str) -> str:
+        return self._google_read(f"Read the Google Doc '{name}'", "read_doc", name)
+
+    def create_doc(self, title: str, content: str = "") -> str:
+        req = ActionRequest("google", f"Create a Google Doc '{title}'", details=f"{len(content)} chars")
+
+        def do():
+            from core.google import GoogleAuth, GoogleClient, GoogleError
+            auth = GoogleAuth()
+            if not auth.is_connected():
+                return "Google isn't connected yet. Run:  jarvis google login"
+            try:
+                link = GoogleClient(auth).create_doc(title, content)
+                return f"Created the Google Doc '{title}': {link}"
+            except GoogleError as exc:
+                if any(s in str(exc).lower() for s in ("insufficient", "scope", "403")):
+                    return "I need the Docs permission - re-run:  jarvis google login  (then try again)."
+                return f"Couldn't create the doc: {exc}"
+
+        return self._gated(req, do, f"Would create a Google Doc '{title}'.")
+
+    def append_to_doc(self, name: str, text: str) -> str:
+        req = ActionRequest("google", f"Add text to the Google Doc '{name}'", details=text[:200])
+
+        def do():
+            from core.google import GoogleAuth, GoogleClient, GoogleError
+            auth = GoogleAuth()
+            if not auth.is_connected():
+                return "Google isn't connected yet. Run:  jarvis google login"
+            try:
+                link = GoogleClient(auth).append_to_doc(name, text)
+                return f"Added to '{name}': {link}" if link.startswith("http") else link
+            except GoogleError as exc:
+                if any(s in str(exc).lower() for s in ("insufficient", "scope", "403")):
+                    return "I need the Docs permission - re-run:  jarvis google login  (then try again)."
+                return f"Couldn't edit the doc: {exc}"
+
+        return self._gated(req, do, f"Would add text to the Google Doc '{name}'.")
+
     def my_gmail_address(self) -> str | None:
         """The signed-in account's own address (for 'send it to myself'). Read-only, gated by 'google'."""
         if self.dry_run:

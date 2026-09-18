@@ -118,6 +118,9 @@ def _write_launcher(target, actions):
 
 
 def run(request, context):
+    # A Google Doc / Drive request belongs to the google_docs skill, not a local file.
+    if re.search(r"\bgoogle\s+docs?\b|\b(?:in|to|on|from)\s+(?:my\s+)?(?:google\s+)?drive\b", request, re.IGNORECASE):
+        return None
     target, name = _target_path(request)
     if target is None:
         return "What filename should I save it as? e.g. 'write a python snake game and save it as snake.py'"

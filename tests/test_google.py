@@ -104,6 +104,64 @@ class GmailOrganizeParsingTests(unittest.TestCase):
         self.assertEqual(self.m._action("label emails as Work"), "label")
 
 
+class DocsClientTests(unittest.TestCase):
+    def test_insert_requests_style_headings(self):
+        from core.google import _doc_insert_requests
+        reqs = _doc_insert_requests("# Title\n\n## Section\nBody text.")
+        self.assertEqual(reqs[0]["insertText"]["text"], "Title\n\nSection\nBody text.")  # markers stripped
+        styles = [r["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"]
+                  for r in reqs if "updateParagraphStyle" in r]
+        self.assertEqual(styles, ["HEADING_1", "HEADING_2"])
+        self.assertEqual(_doc_insert_requests("   "), [])
+
+    def test_create_doc_returns_edit_url(self):
+        from core.google import GoogleClient
+        c = GoogleClient.__new__(GoogleClient)
+        c._post = lambda url, body: {"documentId": "DOC123"} if url.endswith("/documents") else {}
+        self.assertEqual(c.create_doc("Notes", ""), "https://docs.google.com/document/d/DOC123/edit")
+
+    def test_search_docs_formats(self):
+        from core.google import GoogleClient
+        c = GoogleClient.__new__(GoogleClient)
+        c._get = lambda url: {"files": [{"name": "Budget", "webViewLink": "http://x", "id": "1"}]}
+        out = c.search_docs("budget")
+        self.assertIn("Budget", out)
+
+
+class GoogleDocsSkillTests(IsolatedCase):
+    def setUp(self):
+        super().setUp()
+        from core.config import SKILLS_DIR
+        from core.skill_loader import SkillRegistry
+        reg = SkillRegistry(SKILLS_DIR)
+        reg.reload()
+        self.skill = reg.get("google_docs")
+
+    def _run(self, request, actions, llm=None):
+        return self.skill.run(request, {"actions": actions, "llm": llm})
+
+    def test_create_dispatch(self):
+        calls = {}
+        actions = type("A", (), {"create_doc": lambda self, t, c="": calls.update(title=t, content=c) or "http://d"})()
+        self._run("create a google doc titled Trip Plan about Japan", actions,
+                  llm=lambda *a, **k: "## Day 1\nArrive.")
+        self.assertEqual(calls["title"], "Trip Plan")
+        self.assertIn("Day 1", calls["content"])
+
+    def test_search_dispatch(self):
+        calls = {}
+        actions = type("A", (), {"search_docs": lambda self, q: calls.update(q=q) or "ok"})()
+        self._run("search my google docs for the budget", actions)
+        self.assertEqual(calls["q"], "the budget")
+
+    def test_append_dispatch(self):
+        calls = {}
+        actions = type("A", (), {"append_to_doc": lambda self, n, t: calls.update(name=n, text=t) or "http://d"})()
+        self._run("add This is the end. to my google doc Report", actions)
+        self.assertEqual(calls["name"], "Report")
+        self.assertIn("This is the end", calls["text"])
+
+
 class GoogleBrokerTests(IsolatedCase):
     def test_not_connected_message(self):
         broker = ActionBroker(permissions=PermissionRegistry(self.tmp / "p.json"), confirm=lambda req: "once")

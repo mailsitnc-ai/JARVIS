@@ -24,11 +24,48 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 # still never permanently deletes - trash is reversible). Sending is gated by the SENSITIVE 'email_send'
 # capability so it always asks first, even under autonomy. Drive stays read-only.
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/gmail.modify",
-          "https://www.googleapis.com/auth/gmail.send"]
+          "https://www.googleapis.com/auth/gmail.send",
+          "https://www.googleapis.com/auth/documents",       # read + create/edit Google Docs
+          "https://www.googleapis.com/auth/spreadsheets"]    # read + write Google Sheets
+
+DOCS_MIME = "application/vnd.google-apps.document"
+SHEETS_MIME = "application/vnd.google-apps.spreadsheet"
 
 
 class GoogleError(RuntimeError):
     pass
+
+
+def _doc_insert_requests(content: str) -> list:
+    """Build Docs API requests to insert `content`, styling markdown-ish headings (#, ##, ###) and a
+    leading title line, so a created doc looks structured rather than a wall of text."""
+    import re as _re
+
+    lines = content.split("\n")
+    plain, styles, pos = [], [], 0
+    for i, line in enumerate(lines):
+        style, text = None, line
+        m = _re.match(r"^(#{1,3})\s+(.*)$", line)
+        if m:
+            style = {1: "HEADING_1", 2: "HEADING_2", 3: "HEADING_3"}[len(m.group(1))]
+            text = m.group(2)
+        elif i == 0 and line.strip():
+            style = "TITLE"                      # first line becomes the document title style
+        start = pos
+        end = pos + len(text)
+        if style and text.strip():
+            styles.append((start, end, style))
+        plain.append(text)
+        pos = end + 1                            # +1 for the newline that joins the lines
+    final = "\n".join(plain)
+    if not final.strip():
+        return []
+    reqs = [{"insertText": {"location": {"index": 1}, "text": final}}]
+    for start, end, style in styles:
+        reqs.append({"updateParagraphStyle": {
+            "range": {"startIndex": 1 + start, "endIndex": 1 + end + 1},
+            "paragraphStyle": {"namedStyleType": style}, "fields": "namedStyleType"}})
+    return reqs
 
 
 def _store_path():
@@ -177,6 +214,75 @@ class GoogleClient:
             raise GoogleError(f"HTTP {exc.code}: {exc.read(300).decode('utf-8', 'replace')}") from exc
         except (urllib.error.URLError, OSError) as exc:
             raise GoogleError(str(getattr(exc, "reason", exc))) from exc
+
+    def _get_text(self, url: str) -> str:
+        token = self.auth.access_token()
+        if not token:
+            raise GoogleError("not connected to Google")
+        request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(request, timeout=25) as resp:
+                return resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            raise GoogleError(f"HTTP {exc.code}: {exc.read(300).decode('utf-8', 'replace')}") from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise GoogleError(str(getattr(exc, "reason", exc))) from exc
+
+    def _find_files(self, name: str, mime: str, limit: int = 5) -> list:
+        term = name.replace("\\", "\\\\").replace("'", "\\'")
+        params = urllib.parse.urlencode({
+            "q": f"mimeType='{mime}' and (name contains '{term}' or fullText contains '{term}') and trashed = false",
+            "pageSize": limit, "orderBy": "modifiedTime desc", "fields": "files(id,name,webViewLink)"})
+        return self._get(f"https://www.googleapis.com/drive/v3/files?{params}").get("files", [])
+
+    def _resolve_id(self, name_or_id: str, mime: str) -> str | None:
+        import re as _re
+        if _re.fullmatch(r"[A-Za-z0-9_-]{25,}", name_or_id.strip()):
+            return name_or_id.strip()                       # already a Drive/Docs id
+        files = self._find_files(name_or_id, mime, limit=1)
+        return files[0]["id"] if files else None
+
+    # ---- Google Docs --------------------------------------------------------------------------
+
+    def search_docs(self, query: str, limit: int = 5) -> str:
+        files = self._find_files(query, DOCS_MIME, limit)
+        if not files:
+            return f"No Google Docs matching '{query}'."
+        lines = [f"- {f.get('name', '(untitled)')}  {f.get('webViewLink', '')}".rstrip() for f in files]
+        return f"Found {len(files)} Google Doc(s) for '{query}':\n" + "\n".join(lines)
+
+    def read_doc(self, name_or_id: str, max_chars: int = 4000) -> str:
+        did = self._resolve_id(name_or_id, DOCS_MIME)
+        if not did:
+            return f"I couldn't find a Google Doc called '{name_or_id}'."
+        text = self._get_text(f"https://www.googleapis.com/drive/v3/files/{did}/export?mimeType=text/plain").strip()
+        if not text:
+            return "(that doc is empty)"
+        return text[:max_chars] + (" ..." if len(text) > max_chars else "")
+
+    def create_doc(self, title: str, content: str = "") -> str:
+        doc = self._post("https://docs.googleapis.com/v1/documents", {"title": title or "Untitled"})
+        did = doc.get("documentId")
+        if not did:
+            raise GoogleError("couldn't create the document")
+        reqs = _doc_insert_requests(content) if content else []
+        if reqs:
+            self._post(f"https://docs.googleapis.com/v1/documents/{did}:batchUpdate", {"requests": reqs})
+        return f"https://docs.google.com/document/d/{did}/edit"
+
+    def append_to_doc(self, name_or_id: str, text: str) -> str:
+        did = self._resolve_id(name_or_id, DOCS_MIME)
+        if not did:
+            return f"I couldn't find a Google Doc called '{name_or_id}'."
+        doc = self._get(f"https://docs.googleapis.com/v1/documents/{did}?fields=body(content(endIndex))")
+        end = 1
+        for el in doc.get("body", {}).get("content", []):
+            if isinstance(el, dict) and "endIndex" in el:
+                end = el["endIndex"]
+        index = max(1, end - 1)
+        reqs = [{"insertText": {"location": {"index": index}, "text": "\n" + text}}]
+        self._post(f"https://docs.googleapis.com/v1/documents/{did}:batchUpdate", {"requests": reqs})
+        return f"https://docs.google.com/document/d/{did}/edit"
 
     def search_drive(self, query: str, limit: int = 5) -> str:
         term = query.replace("\\", "\\\\").replace("'", "\\'")

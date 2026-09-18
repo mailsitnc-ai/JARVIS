@@ -13,7 +13,7 @@ BUILTIN_SKILLS = ("temperature_converter", "current_time", "calculator", "system
                   "web_search", "screenshot", "browser_tab", "show_screenshot", "speak",
                   "drive_search", "gmail_search", "popup", "write_file", "open_last", "organize_files",
                   "gmail_organize", "camera", "observe_screen", "record_video", "browser_control",
-                  "fix_code", "send_email")
+                  "fix_code", "send_email", "google_docs")
 
 
 class RoutingTests(IsolatedCase):
