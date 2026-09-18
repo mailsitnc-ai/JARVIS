@@ -178,9 +178,13 @@ class GoogleClient:
 
     def search_drive(self, query: str, limit: int = 5) -> str:
         term = query.replace("\\", "\\\\").replace("'", "\\'")
-        q = urllib.parse.quote(f"(name contains '{term}' or fullText contains '{term}') and trashed = false")
-        url = (f"https://www.googleapis.com/drive/v3/files?q={q}&pageSize={limit}"
-               "&orderBy=modifiedTime desc&fields=files(name,webViewLink,mimeType)")
+        params = urllib.parse.urlencode({          # urlencode escapes the spaces in orderBy/fields too
+            "q": f"(name contains '{term}' or fullText contains '{term}') and trashed = false",
+            "pageSize": limit,
+            "orderBy": "modifiedTime desc",
+            "fields": "files(name,webViewLink,mimeType)",
+        })
+        url = f"https://www.googleapis.com/drive/v3/files?{params}"
         files = self._get(url).get("files", [])
         if not files:
             return f"No Drive files matching '{query}'."
