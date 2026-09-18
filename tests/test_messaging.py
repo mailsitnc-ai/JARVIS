@@ -46,10 +46,15 @@ class MessageGatingTests(IsolatedCase):
 class StubActions:
     def __init__(self):
         self.sent = None
+        self.logged_in = False
 
     def send_message(self, app, to, message):
         self.sent = {"app": app, "to": to, "message": message}
         return f"Sent to {to}."
+
+    def whatsapp_login(self):
+        self.logged_in = True
+        return "linking"
 
 
 class ParseTests(IsolatedCase):
@@ -103,6 +108,25 @@ class ParseTests(IsolatedCase):
         _skill("google_chat").run("message the Design space on chat: shipping today", {"actions": act})
         self.assertEqual(act.sent["to"], "Design")
         self.assertEqual(act.sent["message"], "shipping today")
+
+    def test_whatsapp_login_intent_routes_to_linking(self):
+        for cmd in ("log in to whatsapp", "connect whatsapp", "scan the whatsapp qr", "set up whatsapp"):
+            act = StubActions()
+            out = _skill("whatsapp").run(cmd, {"actions": act})
+            self.assertTrue(act.logged_in, cmd)
+            self.assertIsNone(act.sent, cmd)  # a login must never send a message
+            self.assertEqual(out, "linking", cmd)
+
+    def test_message_mentioning_link_still_sends(self):
+        # "link" in the body must NOT be read as a login request.
+        act = StubActions()
+        _skill("whatsapp").run("whatsapp mom saying send me the link", {"actions": act})
+        self.assertEqual(act.sent, {"app": "whatsapp", "to": "mom", "message": "send me the link"})
+        self.assertFalse(act.logged_in)
+
+    def test_login_broker_is_browser_gated_dry_run(self):
+        self.assertIn("Would open WhatsApp Web",
+                      ActionBroker(dry_run=True).whatsapp_login())
 
 
 class ParserUnitTests(unittest.TestCase):

@@ -654,6 +654,16 @@ class ActionBroker:
         return self._browser_action("Run JavaScript on the page", expression[:120], work,
                                     "Would run JavaScript on the page.")
 
+    def whatsapp_login(self) -> str:
+        """One-time: open WhatsApp Web in JARVIS's Chrome so the user can scan the QR. Gated by 'browser'
+        (it opens a page, it doesn't send anything). The session persists, so this is needed only once."""
+        def work(c):
+            return c.whatsapp_login(emit=self.emit)
+
+        return self._browser_action("Open WhatsApp Web to link JARVIS's Chrome (one-time QR scan)",
+                                    "web.whatsapp.com", work,
+                                    "Would open WhatsApp Web for a one-time QR scan.")
+
     def send_message(self, app: str, to: str, message: str) -> str:
         """Send a chat message (WhatsApp / Google Chat) by driving the web app in JARVIS's Chrome. Gated by
         SENSITIVE 'message_send' - always asks first, showing the app, recipient and full message."""

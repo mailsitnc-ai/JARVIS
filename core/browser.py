@@ -306,6 +306,39 @@ class ChromeController:
 
     # ---- messaging (best-effort DOM automation of web apps) -----------------------------------
 
+    _WA_LOGGED_IN_JS = ("!!(document.querySelector('#pane-side')"
+                        "||document.querySelector('div[contenteditable=\"true\"][data-tab=\"3\"]')"
+                        "||document.querySelector('div[title=\"Search input textbox\"]'))")
+
+    def _wa_logged_in(self) -> bool:
+        try:
+            return bool(self.evaluate(self._WA_LOGGED_IN_JS))
+        except BrowserError:
+            return False
+
+    def whatsapp_login(self, wait: float = 150, emit=None) -> str:
+        """Open WhatsApp Web in JARVIS's own Chrome and wait for a one-time QR scan. The dedicated Chrome
+        profile persists the session, so this is needed only once - after linking, sends are quick and
+        never need scanning again. Scanning links JARVIS as an extra device; it does NOT sign the user
+        out on their phone."""
+        say = emit or (lambda *a: None)
+        self.ensure()
+        if not str(self.current_url()).startswith("https://web.whatsapp.com"):
+            self.navigate("https://web.whatsapp.com", wait=25)
+        if self._wa_logged_in():
+            return "WhatsApp is already linked in JARVIS's Chrome — you're set; sends are quick from here."
+        say("whatsapp", "Opened WhatsApp Web in JARVIS's Chrome. On your phone: Settings ▸ Linked devices ▸ "
+                        "Link a device, and scan the QR. (This adds JARVIS as an extra device — it won't log "
+                        "you out on your phone.)")
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            time.sleep(2)
+            if self._wa_logged_in():
+                return ("WhatsApp is linked now — I'll stay signed in, so from now on I just send, no window "
+                        "to scan or babysit.")
+        return ("Not linked yet. The WhatsApp Web window is open in JARVIS's Chrome — scan the QR (Linked "
+                "devices) whenever you're ready; once linked it stays linked and future sends are instant.")
+
     def whatsapp_send(self, to: str, message: str) -> str:
         """Send a WhatsApp message via WhatsApp Web. Reliable with a phone number (uses the send deep
         link); name-based search is best-effort. Needs WhatsApp Web logged in (QR scanned) in this Chrome."""
@@ -315,9 +348,13 @@ class ChromeController:
         if by_phone:
             self.navigate(f"https://web.whatsapp.com/send?phone={digits}&text={urllib.parse.quote(message)}", wait=30)
         else:
-            self.navigate("https://web.whatsapp.com", wait=30)
-            if not self._wait_for("!!document.querySelector('div[contenteditable=\"true\"]')", 45):
-                return "WhatsApp Web isn't ready - open JARVIS's Chrome and scan the WhatsApp QR once, then retry."
+            # Reuse the already-open WhatsApp tab if we're linked - don't reload (fast, no flicker).
+            on_wa = str(self.current_url()).startswith("https://web.whatsapp.com")
+            if not (on_wa and self._wa_logged_in()):
+                self.navigate("https://web.whatsapp.com", wait=30)
+            if not self._wait_for(self._WA_LOGGED_IN_JS, 12 if self._wa_logged_in() else 40):
+                return ("WhatsApp Web isn't linked yet. Say 'log in to WhatsApp' once — I'll open it so you "
+                        "can scan the QR, and it stays linked after that (I won't need to reopen it to send).")
             self.evaluate(_WA_SEARCH_JS % json.dumps(to))
             time.sleep(1.8)
             if not self.evaluate(_WA_OPEN_FIRST_JS):
