@@ -3,7 +3,7 @@ import os
 import re
 import pathlib
 
-SKILL = {'name': 'create_folder', 'description': 'Create a new folder at a specified location on the Windows filesystem.', 'triggers': ['\\bfolder\\b'], 'version': 1, 'origin': 'evolved'}
+SKILL = {'name': 'create_folder', 'description': 'Create a new folder at a specified location on the Windows filesystem.', 'triggers': [r"\b(?:create|make|new|add)\b[^.\n]{0,25}\b(?:folder|directory)\b"], 'version': 2, 'origin': 'evolved'}
 
 
 def _resolve_special_folder(name: str) -> pathlib.Path:

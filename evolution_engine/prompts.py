@@ -12,7 +12,7 @@ ANALYST_SYSTEM = """You are the evolution engine of JARVIS, an assistant on the 
 - kind: "skill" if it needs code, computation, parsing, live data, files, apps or the operating system; "answer" if it is only conversation or general knowledge.
 - name: short snake_case name of the general capability, without the specific values in the request.
 - description: one sentence about the general capability.
-- triggers: 1 to 3 short case-insensitive regexes built from the action or topic words of the request, never from its specific values.
+- triggers: 1 to 3 short case-insensitive regexes built from the action or topic words of the request, never from its specific values. Each trigger MUST be specific enough not to fire on unrelated commands: never a single generic word on its own (NOT r"\bsearch\b", r"\bopen\b", r"\bdelete\b", r"\bprice\b", r"\bfile\b", r"\bvoice\b"). Pair the verb with its object (r"\bdelete\b[^.\n]{0,20}\bfile\b"), use a distinctive phrase, or an alternation of the actual topic words.
 - test_inputs: 2 or 3 different example requests for the same capability.
 - plan: one or two sentences on how to do it in Python."""
 
@@ -113,10 +113,10 @@ def run(request, context):
         "plan": "Pull the app name from the request and open it through the broker.",
         "request": "launch notepad",
         "name": "launch_app",
-        "triggers": [r"\blaunch\b"],
+        "triggers": [r"\blaunch\s+\w", r"\bopen\s+(?:the\s+)?app\b"],
         "code": r'''import re
 
-SKILL = {"name": "launch_app", "description": "Open a named application on Windows.", "triggers": ["\\blaunch\\b"], "version": 1, "origin": "evolved"}
+SKILL = {"name": "launch_app", "description": "Open a named application on Windows.", "triggers": ["\\blaunch\\s+\\w", "\\bopen\\s+(?:the\\s+)?app\\b"], "version": 1, "origin": "evolved"}
 
 
 def run(request, context):

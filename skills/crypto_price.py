@@ -2,7 +2,9 @@
 import json
 import re
 
-SKILL = {'name': 'crypto_price', 'description': 'Retrieve the current price of a cryptocurrency in a specified fiat currency, including 24‑hour change.', 'triggers': ['\\bprice\\b', '\\bbitcoin\\b', '\\busd\\b'], 'version': 1, 'origin': 'evolved'}
+SKILL = {'name': 'crypto_price', 'description': 'Retrieve the current price of a cryptocurrency in a specified fiat currency, including 24‑hour change.', 'triggers': [r"\b(?:bitcoin|btc|ethereum|\beth\b|dogecoin|doge|solana|\bsol\b|litecoin|cardano|xrp|ripple|crypto(?:currency)?)\b",
+             r"\bprice\s+of\b", r"\bhow\s+much\s+is\s+(?:a\s+)?(?:bitcoin|btc|ethereum|eth|crypto)"],
+'version': 2, 'origin': 'evolved'}
 
 
 def _extract_terms(request: str):

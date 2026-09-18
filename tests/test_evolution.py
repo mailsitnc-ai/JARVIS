@@ -420,6 +420,26 @@ class SmallModelHardeningTests(IsolatedCase):
         self.assertEqual(clean_triggers(["\\bgenerate\\b"], request), [r"\bpassword\b"])
         self.assertEqual(heuristic_spec(request).triggers, [r"\bpassword\b"])
 
+    def test_contract_rejects_single_common_word_triggers_for_evolved_skills(self):
+        import types
+
+        from core.contract import contract_problems
+
+        def make(origin, triggers):
+            mod = types.ModuleType("m")
+            mod.SKILL = {"name": "demo_skill", "description": "d", "triggers": triggers, "origin": origin}
+            mod.run = lambda request, context: "ok"
+            return mod
+
+        # An evolved skill triggering on a single generic word is rejected (this is what let web_search_2
+        # hijack "search my google docs").
+        for bad in (["\\bsearch\\b"], ["\\bdelete\\b"], ["\\bprice\\b"], ["\\bfolder\\b"], ["\\bvoice\\b"]):
+            self.assertTrue(any("too broad" in p for p in contract_problems(make("evolved", bad))), bad)
+        # Specific phrases / alternations are fine, and built-ins are exempt.
+        self.assertEqual(contract_problems(make("evolved", [r"\bdelete\b[^.\n]{0,20}\bfile\b"])), [])
+        self.assertEqual(contract_problems(make("evolved", [r"\b(?:bitcoin|btc|ethereum)\b"])), [])
+        self.assertEqual(contract_problems(make("builtin", ["\\bsearch\\b"])), [])
+
     def test_heuristic_spec_names_the_capability_not_the_value(self):
         spec = heuristic_spec("count the vowels in the word banana")
         self.assertEqual((spec.name, spec.triggers), ("count_vowels", [r"\bvowels\b"]))

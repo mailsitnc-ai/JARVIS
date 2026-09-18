@@ -22,6 +22,27 @@ import re
 
 REQUIRED_KEYS = ("name", "description", "triggers")
 
+# Generic words that appear in countless unrelated commands. An evolved skill whose trigger is just one
+# of these (e.g. r"\bsearch\b") hijacks routing - it steals "search my google docs", "delete this email"
+# and so on from the real skills. Such triggers are rejected; a skill must use a specific phrase or an
+# alternation instead. (Built-in skills are trusted and exempt.)
+_BROAD_WORDS = {
+    "search", "find", "look", "open", "launch", "start", "close", "get", "fetch", "show", "display",
+    "play", "run", "execute", "make", "create", "build", "write", "generate", "delete", "remove",
+    "trash", "erase", "send", "post", "share", "message", "msg", "chat", "dm", "email", "mail", "call",
+    "price", "cost", "value", "worth", "buy", "sell", "folder", "directory", "file", "files", "voice",
+    "speak", "say", "talk", "read", "tell", "video", "record", "photo", "picture", "image", "screenshot",
+    "code", "app", "application", "web", "site", "website", "page", "note", "notes", "doc", "docs",
+    "document", "download", "upload", "list", "new", "add", "time", "date", "weather", "news", "music",
+    "song", "bitcoin", "crypto", "usd", "recipe", "recipes",
+}
+
+
+def _too_broad(trigger: str) -> bool:
+    """True when a trigger reduces to exactly one generic word (r"\\bsearch\\b" -> "search")."""
+    core = str(trigger).strip().replace("\\b", "").replace("^", "").replace("$", "").strip().lower()
+    return core in _BROAD_WORDS
+
 
 def contract_problems(module) -> list[str]:
     problems: list[str] = []
@@ -41,11 +62,15 @@ def contract_problems(module) -> list[str]:
     if not isinstance(triggers, (list, tuple)) or not triggers or not all(isinstance(t, str) for t in triggers):
         problems.append("SKILL['triggers'] must be a non-empty list of regex strings")
     else:
+        evolved = str(meta.get("origin", "")).lower() == "evolved"
         for trigger in triggers:
             try:
                 re.compile(trigger, re.IGNORECASE)
             except re.error as exc:
                 problems.append(f"invalid trigger {trigger!r}: {exc}")
+            if evolved and _too_broad(trigger):
+                problems.append(f"trigger {trigger!r} is too broad - a single common word hijacks "
+                                f"unrelated commands; use a specific phrase or an alternation")
 
     requires = meta.get("requires")
     if requires is not None and (not isinstance(requires, (list, tuple)) or not all(isinstance(r, str) for r in requires)):

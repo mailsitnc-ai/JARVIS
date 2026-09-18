@@ -3,7 +3,7 @@ import os
 import re
 from pathlib import Path
 
-SKILL = {'name': 'delete_file', 'description': 'Delete a specified file from the filesystem.', 'triggers': ['\\bdelete\\b'], 'version': 1, 'origin': 'evolved'}
+SKILL = {'name': 'delete_file', 'description': 'Delete a specified file from the filesystem.', 'triggers': [r"\b(?:delete|remove|trash|erase)\b[^.\n]{0,30}\b(?:file|folder|\.[A-Za-z0-9]{1,5}\b)"], 'version': 2, 'origin': 'evolved'}
 
 
 def run(request: str, context: dict) -> str:

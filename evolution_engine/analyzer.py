@@ -26,7 +26,10 @@ _UNRELATED_PROBES = ("", "please do something unrelated", "zzqx 12345")
 # A trigger that is only one of these verbs would catch unrelated requests ("generate a poem" -> password skill).
 _GENERIC_WORDS = frozenset(
     "generate make create get show give find tell do run count convert calculate compute list open check "
-    "random new write build".split()
+    "random new write build search look launch start close play send post share message msg chat dm email "
+    "mail call delete remove trash erase price cost value worth buy sell folder directory file files voice "
+    "speak say talk read record download upload note notes doc docs document web site website page app "
+    "application time date fetch display execute add".split()
 )
 
 
