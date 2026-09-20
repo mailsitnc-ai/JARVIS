@@ -19,17 +19,18 @@ cd JARVIS
 
 ## 3. Install dependencies
 
+The **core assistant needs nothing** — it's standard-library only. So you can skip straight to step 5
+and run it. To add camera/vision and browser/WhatsApp control (prebuilt wheels, no compiler):
+
 ```bash
 python3 -m pip install --user -r requirements.txt
 ```
 
-`requirements.txt` covers the optional native features. The core assistant (chat, files, apps, Google,
-skills) needs none of them — install only what you want:
-
-- `opencv-python` — camera, vision, hand-gesture control
-- `websocket-client` — browser/WhatsApp DevTools control
-- `pyobjc-framework-Quartz` — mouse-wheel scrolling for hand-gesture control
-- `pynput` — the global hotkey to summon the panel (needs Accessibility permission)
+Optional extras that may need to compile (`requirements-extras.txt`: gesture mouse-scroll via pyobjc,
+global hotkey via pynput) only install cleanly on a Python that ships prebuilt wheels for your macOS —
+the **python.org** or **Homebrew** Python 3.11+, not the bare Command Line Tools Python. If
+`pip install -r requirements-extras.txt` fails to build, it's safe to skip; you just lose gesture-scroll
+and the summon hotkey. A newer Python also gives you the Tk panel window.
 
 ## 4. Add your API keys (you re-add these on the Mac)
 

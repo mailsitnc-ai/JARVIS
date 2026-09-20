@@ -1,14 +1,15 @@
-# JARVIS optional native features. The core assistant (chat, files, apps, Google, skills) needs NONE of
-# these - install only the features you want. JARVIS also auto-installs some of these on first use.
+# JARVIS optional features that install as prebuilt wheels (no compiler needed).
+# The CORE assistant (chat, files, apps, Google, skills) needs NONE of these - it's standard-library
+# only. Install these to add camera/vision and browser/WhatsApp control:
+#     python3 -m pip install --user -r requirements.txt
 
-# Camera capture, vision, hand-gesture control (Windows + macOS + Linux)
+# Camera capture, vision, hand-gesture recognition (prebuilt wheel, all platforms)
 opencv-python>=4.5
 
-# Real Chrome control over DevTools: browser automation, WhatsApp Web, Google Chat
+# Real Chrome control over DevTools: browser automation, WhatsApp Web, Google Chat (pure Python)
 websocket-client>=1.0
 
-# macOS only: mouse-wheel scrolling for hand-gesture control
-pyobjc-framework-Quartz>=9.0 ; sys_platform == "darwin"
-
-# macOS/Linux: global hotkey to summon the panel (needs Accessibility permission on macOS)
-pynput>=1.7 ; sys_platform != "win32"
+# The gesture mouse-scroll (pyobjc-framework-Quartz) and the global hotkey (pynput) are in
+# requirements-extras.txt because they may need to COMPILE on macOS. Install them only on a Python
+# that has prebuilt wheels for your macOS (e.g. python.org / Homebrew Python 3.11+):
+#     python3 -m pip install --user -r requirements-extras.txt

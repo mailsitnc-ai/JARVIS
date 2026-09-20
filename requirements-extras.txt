@@ -1,0 +1,10 @@
+# OPTIONAL macOS/Linux extras that may need to compile. Install these only on a Python that has
+# prebuilt wheels for your OS (python.org or Homebrew Python 3.11+ on macOS). They are NOT required:
+# JARVIS runs fine without them - you just lose gesture mouse-scroll and the global summon hotkey.
+#     python3 -m pip install --user -r requirements-extras.txt
+
+# macOS: mouse-wheel scrolling for hand-gesture control
+pyobjc-framework-Quartz>=9.0 ; sys_platform == "darwin"
+
+# macOS/Linux: global hotkey to summon the panel (needs Accessibility permission on macOS)
+pynput>=1.7 ; sys_platform != "win32"
