@@ -73,7 +73,9 @@ class JarvisPanel:
         ratio = float(settings.get("window.split", 0.6))
         side = str(settings.get("window.jarvis_side", "right"))
         self.split = SplitController(ratio, side)
-        # macOS docks via the Accessibility API instead of Win32; None -> plain floating panel.
+        self.is_mac = sys.platform == "darwin"
+        # macOS docks via the Accessibility API instead of Win32; None -> we still size our own 40%
+        # column with Tk (below), we just can't move the other app's window.
         self.mac_split = macwm.MacSplit(ratio, side) if macwm.available() else None
 
         self.root = tk.Tk()
@@ -682,12 +684,16 @@ class JarvisPanel:
     def show(self, target=None) -> None:
         self.root.deiconify()
         self.root.update_idletasks()
-        if self.mac_split is not None:  # macOS: dock via the Accessibility API, place our own window with Tk
+        if self.is_mac:  # macOS: always size our own 40% column; move the other window if AX is available
             try:
-                note = self.mac_split.enter(self.root, target)
-                if note.startswith("No app"):
-                    self._write(f"  · {note}\n", "event")
+                if self.mac_split is not None:
+                    note = self.mac_split.enter(self.root, target)
+                    if note.startswith("No app"):
+                        self._write(f"  · {note}\n", "event")
+                else:
+                    self._place_column_tk()
             except Exception as exc:
+                self._place_column_tk()
                 self._write(f"Window split failed: {exc}\n", "error")
             self.visible = True
             self.reactor.set_visible(True)
@@ -705,6 +711,17 @@ class JarvisPanel:
         self.reactor.set_visible(True)
         win32.bring_to_front(hwnd)
         self.entry.focus_force()
+
+    def _place_column_tk(self) -> None:
+        """Size and position the panel as the 40% column using Tk's own screen metrics (works with no
+        pyobjc). ~25px is left for the menu bar; the Dock may overlap the bottom slightly."""
+        from window_manager.split import compute_layout
+        from window_manager.win32 import Rect
+        menubar = 25
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        _main, jarvis = compute_layout(Rect(0, menubar, sw, sh - menubar), self.split.ratio, self.split.jarvis_side)
+        self.root.geometry(f"{jarvis.width}x{jarvis.height}+{jarvis.left}+{jarvis.top}")
 
     def _raise_mac(self) -> None:
         """Bring the panel above other apps and give it keyboard focus on macOS."""

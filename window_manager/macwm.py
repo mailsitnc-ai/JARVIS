@@ -13,15 +13,16 @@ import os
 import sys
 
 _AVAILABLE = False
+_IMPORT_ERROR = ""
 if sys.platform == "darwin":
     try:
         from AppKit import NSApplication, NSScreen, NSWorkspace
+        from Foundation import NSMakePoint, NSMakeSize  # NSPoint/NSSize == CGPoint/CGSize; AXValue bridges them
         from ApplicationServices import (AXUIElementCopyAttributeValue, AXUIElementCreateApplication,
                                           AXUIElementSetAttributeValue, AXValueCreate, AXValueGetValue)
-        from Quartz import CGPoint, CGSize
         _AVAILABLE = True
-    except Exception:
-        _AVAILABLE = False
+    except Exception as exc:
+        _IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
 # AX attribute names are plain strings; using the literals avoids pyobjc version-to-version constant
 # renames. AXValueType: CGPoint = 1, CGSize = 2.
@@ -64,8 +65,8 @@ class MacWindow:
 
     def move_resize(self, x, y, w, h) -> bool:
         try:
-            AXUIElementSetAttributeValue(self.ax, _POS, AXValueCreate(_T_POINT, CGPoint(float(x), float(y))))
-            AXUIElementSetAttributeValue(self.ax, _SIZE, AXValueCreate(_T_SIZE, CGSize(float(w), float(h))))
+            AXUIElementSetAttributeValue(self.ax, _POS, AXValueCreate(_T_POINT, NSMakePoint(float(x), float(y))))
+            AXUIElementSetAttributeValue(self.ax, _SIZE, AXValueCreate(_T_SIZE, NSMakeSize(float(w), float(h))))
             return True
         except Exception:
             return False
