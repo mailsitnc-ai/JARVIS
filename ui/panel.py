@@ -18,7 +18,7 @@ import traceback
 
 from core.config import ARCHIVE_DIR, SKILLS_DIR, load_settings, user_dir
 from ui.reactor import ArcReactor
-from window_manager import win32
+from window_manager import macwm, win32
 from window_manager.hotkey import HotkeyListener
 from window_manager.ipc import ControlServer
 from window_manager.split import SplitController
@@ -70,7 +70,11 @@ class JarvisPanel:
         self.jarvis = None
         self.history: list[str] = []
         self.history_pos = 0
-        self.split = SplitController(float(settings.get("window.split", 0.6)), str(settings.get("window.jarvis_side", "right")))
+        ratio = float(settings.get("window.split", 0.6))
+        side = str(settings.get("window.jarvis_side", "right"))
+        self.split = SplitController(ratio, side)
+        # macOS docks via the Accessibility API instead of Win32; None -> plain floating panel.
+        self.mac_split = macwm.MacSplit(ratio, side) if macwm.available() else None
 
         self.root = tk.Tk()
         self.root.withdraw()
@@ -678,6 +682,18 @@ class JarvisPanel:
     def show(self, target=None) -> None:
         self.root.deiconify()
         self.root.update_idletasks()
+        if self.mac_split is not None:  # macOS: dock via the Accessibility API, place our own window with Tk
+            try:
+                note = self.mac_split.enter(self.root, target)
+                if note.startswith("No app"):
+                    self._write(f"  · {note}\n", "event")
+            except Exception as exc:
+                self._write(f"Window split failed: {exc}\n", "error")
+            self.visible = True
+            self.reactor.set_visible(True)
+            self._raise_mac()
+            self.entry.focus_force()
+            return
         hwnd = self._hwnd()
         try:
             note = self.split.enter(hwnd, target)
@@ -690,9 +706,23 @@ class JarvisPanel:
         win32.bring_to_front(hwnd)
         self.entry.focus_force()
 
+    def _raise_mac(self) -> None:
+        """Bring the panel above other apps and give it keyboard focus on macOS."""
+        macwm.activate_self()
+        try:
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+            self.root.after(120, lambda: self.root.attributes("-topmost", False))
+            self.root.focus_force()
+        except Exception:
+            pass
+
     def hide(self) -> None:
         try:
-            self.split.exit()
+            if self.mac_split is not None:
+                self.mac_split.exit(self.root)
+            else:
+                self.split.exit()
         except OSError as exc:
             log.warning("restoring window failed: %s", exc)
         self.root.withdraw()

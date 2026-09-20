@@ -109,7 +109,13 @@ def set_dpi_awareness() -> None:
     user32.SetProcessDPIAware()
 
 
-def foreground() -> int | None:
+def foreground():
+    if not _WIN:  # macOS: hand back the frontmost app's window (a macwm.MacWindow) for the 60/40 split
+        try:
+            from . import macwm
+            return macwm.frontmost_window()
+        except Exception:
+            return None
     return _GetForegroundWindow() or None
 
 
