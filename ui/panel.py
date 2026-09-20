@@ -37,7 +37,7 @@ HELP = """Commands
   /autonomy on|off  unleash / re-gate /lessons  what JARVIS learned
   /model [name]  show/switch the model  /usage    model usage per model
   /agenda       scheduled tasks JARVIS runs on its own (manage from: jarvis agenda)
-  /clear        clear this panel (or Ctrl+Shift+R)    /hide  hide JARVIS (or Esc)
+  /clear        clear this panel (or Ctrl+Shift+3)    /hide  hide JARVIS (or Esc)
 Anything else is a request. If no skill can handle it, JARVIS builds one.
 By default actions on your PC ask for approval. Turn on autonomy (🔥 header button) to let it act freely.
 Say "improve your <name> skill" and JARVIS rewrites that skill to be better."""
@@ -117,7 +117,7 @@ class JarvisPanel:
         # The chat box lives at the bottom; everything above it is the reactor. Pack the bottom
         # pieces first (footer, input, transcript) so the reactor can expand to fill all the rest.
         footer = tk.Label(self.root,
-                          text=f"Enter send · Esc hide · {self.hotkey} toggle · {self.interrupt_hotkey} stop · ctrl+shift+r clear",
+                          text=f"Enter send · Esc hide · {self.hotkey} toggle · {self.interrupt_hotkey} stop · ctrl+shift+3 clear",
                           fg=C["dim"], bg=C["bg"], font=("Segoe UI", 8))
         footer.pack(side="bottom", anchor="w", padx=14, pady=(0, 8))
 
@@ -146,8 +146,8 @@ class JarvisPanel:
         self.entry.bind("<Up>", lambda _e: self._recall(-1))
         self.entry.bind("<Down>", lambda _e: self._recall(1))
         self.root.bind("<Escape>", lambda _e: self.hide())
-        self.root.bind_all("<Control-Shift-R>", self._hard_refresh)  # hard refresh: clear the transcript
-        self.root.bind_all("<Control-Shift-r>", self._hard_refresh)
+        for _seq in ("<Control-Shift-Key-3>", "<Control-numbersign>", "<Control-Key-3>"):  # hard refresh
+            self.root.bind_all(_seq, self._hard_refresh)  # clear the transcript (Ctrl+Shift+3)
 
         # The reactor fills everything between the header and the chat box - JARVIS's animated face.
         self.reactor = ArcReactor(self.root)
