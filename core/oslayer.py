@@ -262,6 +262,50 @@ def scroll(amount: int, up: bool) -> None:
                 pass
 
 
+# ---- camera (macOS TCC permission + the right OpenCV backend) ---------------------------------
+
+def camera_backend(cv2):
+    """The OpenCV capture backend to use per platform - never Windows DirectShow on macOS."""
+    if IS_WINDOWS:
+        return getattr(cv2, "CAP_DSHOW", 0)
+    if IS_MAC:
+        return getattr(cv2, "CAP_AVFOUNDATION", 0)
+    return 0
+
+
+def request_camera_access():
+    """macOS only: make sure camera permission is granted, triggering the system prompt when it's still
+    undetermined (OpenCV never triggers it, so the capture just fails silently otherwise). Returns True
+    if authorized, False if denied/restricted, None if it couldn't check (caller should let OpenCV try)."""
+    if not IS_MAC:
+        return True
+    try:
+        import AVFoundation
+    except Exception:
+        return None  # the AVFoundation pyobjc framework isn't installed; let OpenCV attempt anyway
+    try:
+        import threading
+        media = AVFoundation.AVMediaTypeVideo
+        status = AVFoundation.AVCaptureDevice.authorizationStatusForMediaType_(media)
+        # AVAuthorizationStatus: 0 notDetermined, 1 restricted, 2 denied, 3 authorized
+        if status == 3:
+            return True
+        if status in (1, 2):
+            return False
+        done = threading.Event()
+        result = {"granted": False}
+
+        def handler(granted):
+            result["granted"] = bool(granted)
+            done.set()
+
+        AVFoundation.AVCaptureDevice.requestAccessForMediaType_completionHandler_(media, handler)
+        done.wait(120)  # wait for the user to click Allow / Deny
+        return result["granted"]
+    except Exception:
+        return None
+
+
 # ---- Chrome (for DevTools browser control) ----------------------------------------------------
 
 def chrome_path() -> str | None:

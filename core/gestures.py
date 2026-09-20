@@ -91,7 +91,11 @@ class GestureController:
         except ImportError:
             self.error = "the camera library (opencv) isn't available"
             return
-        cap = cv2.VideoCapture(self.camera_index, getattr(cv2, "CAP_DSHOW", 0))
+        from core import oslayer
+        if oslayer.request_camera_access() is False:
+            self.error = "camera access is blocked (enable JARVIS/Python in System Settings > Privacy > Camera)"
+            return
+        cap = cv2.VideoCapture(self.camera_index, oslayer.camera_backend(cv2))
         if not cap or not cap.isOpened():
             self.error = "couldn't open the webcam (is it in use by another app?)"
             if cap:

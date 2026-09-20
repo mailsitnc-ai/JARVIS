@@ -6,5 +6,8 @@
 # macOS: mouse-wheel scrolling for hand-gesture control
 pyobjc-framework-Quartz>=9.0 ; sys_platform == "darwin"
 
+# macOS: triggers the camera permission prompt (OpenCV alone never does) so photos/vision/gestures work
+pyobjc-framework-AVFoundation>=9.0 ; sys_platform == "darwin"
+
 # macOS/Linux: global hotkey to summon the panel (needs Accessibility permission on macOS)
 pynput>=1.7 ; sys_platform != "win32"

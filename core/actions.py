@@ -510,7 +510,11 @@ class ActionBroker:
                     import cv2
                 except ImportError:
                     return "I need the 'opencv-python' package for the camera and couldn't load it."
-            cap = cv2.VideoCapture(0, getattr(cv2, "CAP_DSHOW", 0))  # DirectShow: opens fast on Windows
+            osl = _osl()
+            if osl.request_camera_access() is False:  # macOS: prompt for / verify camera permission
+                return ("macOS is blocking camera access. Enable it in System Settings > Privacy & "
+                        "Security > Camera (for JARVIS / Python), then try again.")
+            cap = cv2.VideoCapture(0, osl.camera_backend(cv2))  # AVFoundation on macOS, DirectShow on Windows
             if not cap or not cap.isOpened():
                 if cap:
                     cap.release()
@@ -562,7 +566,11 @@ class ActionBroker:
                     import cv2
                 except ImportError:
                     return "I need the 'opencv-python' package for the camera and couldn't load it."
-            cap = cv2.VideoCapture(0, getattr(cv2, "CAP_DSHOW", 0))
+            osl = _osl()
+            if osl.request_camera_access() is False:
+                return ("macOS is blocking camera access. Enable it in System Settings > Privacy & "
+                        "Security > Camera (for JARVIS / Python), then try again.")
+            cap = cv2.VideoCapture(0, osl.camera_backend(cv2))
             if not cap or not cap.isOpened():
                 if cap:
                     cap.release()
