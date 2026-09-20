@@ -1,0 +1,4 @@
+# Shell scripts must keep Unix (LF) line endings or they won't run on macOS/Linux
+# ("bad interpreter: /bin/bash^M").
+*.sh text eol=lf
+*.command text eol=lf
