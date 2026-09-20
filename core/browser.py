@@ -185,15 +185,20 @@ class ChromeController:
         pages = [t for t in self._targets() if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
         if pages:
             return pages[0]
-        # No page yet: ask Chrome to open a blank one.
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/new?about:blank", timeout=3) as resp:
-                target = json.loads(resp.read().decode("utf-8"))
-                if target.get("webSocketDebuggerUrl"):
-                    return target
-        except (OSError, ValueError):
-            pass
-        raise BrowserError("Chrome is running but I couldn't attach to a tab.")
+        # No page tab (they were all closed): ask Chrome to open a blank one. Chrome >= 111 requires a
+        # PUT for /json/new; older Chrome only allows GET - try PUT first, then fall back to GET.
+        url = f"http://127.0.0.1:{self.port}/json/new?about:blank"
+        for method in ("PUT", "GET"):
+            try:
+                req = urllib.request.Request(url, method=method)
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    target = json.loads(resp.read().decode("utf-8"))
+                    if target.get("webSocketDebuggerUrl"):
+                        return target
+            except (OSError, ValueError):
+                continue
+        raise BrowserError("Chrome is running but I couldn't open a tab to work in - close JARVIS's Chrome "
+                           "window and try again so it relaunches cleanly.")
 
     def _connect(self):
         if self._ws is not None:
