@@ -9,6 +9,11 @@ opencv-python>=4.5
 # Real Chrome control over DevTools: browser automation, WhatsApp Web, Google Chat (pure Python)
 websocket-client>=1.0
 
+# The animated arc-reactor visuals in the panel (a 3D mesh sphere + orbiting rings). Without these the
+# panel falls back to a plain glowing circle. Both are prebuilt wheels.
+Pillow>=9.0
+numpy>=1.21
+
 # The gesture mouse-scroll (pyobjc-framework-Quartz) and the global hotkey (pynput) are in
 # requirements-extras.txt because they may need to COMPILE on macOS. Install them only on a Python
 # that has prebuilt wheels for your macOS (e.g. python.org / Homebrew Python 3.11+):
