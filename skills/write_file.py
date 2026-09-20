@@ -106,15 +106,33 @@ def _python_exe():
 
 
 def _write_launcher(target, actions):
-    """Write a double-clickable <stem>.bat next to a console app so its window stays open. Returns its name."""
-    bat = target.with_name(target.stem + ".bat")
-    body = ("@echo off\r\n"
-            f'cd /d "{target.parent}"\r\n'
-            f'"{_python_exe()}" "{target.name}"\r\n'
-            "echo.\r\n"
-            "pause\r\n")
-    result = actions.write_file(str(bat), body)
-    return bat.name if result.startswith(("Wrote", "Would")) else None
+    """Write a double-clickable launcher next to a console app so its window stays open. A .bat on
+    Windows, a .command (made executable) on macOS, a .sh on Linux. Returns its filename."""
+    from core.oslayer import IS_MAC, IS_WINDOWS
+    if IS_WINDOWS:
+        launcher = target.with_name(target.stem + ".bat")
+        body = ("@echo off\r\n"
+                f'cd /d "{target.parent}"\r\n'
+                f'"{_python_exe()}" "{target.name}"\r\n'
+                "echo.\r\n"
+                "pause\r\n")
+    else:
+        launcher = target.with_name(target.stem + (".command" if IS_MAC else ".sh"))
+        body = ("#!/bin/bash\n"
+                f'cd "{target.parent}"\n'
+                f'"{_python_exe()}" "{target.name}"\n'
+                'echo\n'
+                'read -n 1 -s -r -p "Press any key to close..."\n')
+    result = actions.write_file(str(launcher), body)
+    if not result.startswith(("Wrote", "Would")):
+        return None
+    if not IS_WINDOWS:
+        try:
+            import os
+            os.chmod(launcher, 0o755)  # so it's double-clickable / runnable
+        except OSError:
+            pass
+    return launcher.name
 
 
 def run(request, context):
@@ -137,19 +155,23 @@ def run(request, context):
     if not content or content.startswith("[LLM unavailable"):
         return "I couldn't generate the file contents just now."
 
+    from core.oslayer import IS_WINDOWS
     note = ""
     is_python = target.suffix.lower() in (".py", ".pyw")
+    is_gui = False
     if is_python:                                       # generate -> verify it actually runs -> save
         content, note = _verify_python(name, content, context)
-        # A GUI app should double-click cleanly with no console: save it as .pyw.
-        if target.suffix.lower() == ".py" and _GUI.search(content):
+        is_gui = target.suffix.lower() == ".pyw" or bool(_GUI.search(content))
+        # On Windows a GUI app double-clicks cleanly with no console if saved as .pyw; on macOS/Linux
+        # a GUI .py runs fine under python3, so keep the .py extension there.
+        if is_gui and target.suffix.lower() == ".py" and IS_WINDOWS:
             target = target.with_suffix(".pyw")
             name = target.name
             note += " (GUI app - saved as .pyw so it runs without a console)"
 
     actions = context["actions"]
     launcher = None
-    if is_python and target.suffix.lower() == ".py":   # console app: add a double-click launcher, written
+    if is_python and not is_gui:                        # console app: add a double-click launcher, written
         launcher = _write_launcher(target, actions)    # BEFORE the app so the app stays the "last file"
     result = actions.write_file(str(target), content)
     if not result.startswith(("Wrote", "Would")):

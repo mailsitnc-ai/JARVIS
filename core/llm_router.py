@@ -172,7 +172,7 @@ def ollama_environment() -> dict:
     """
     env = dict(os.environ)
     try:
-        import winreg
+        import winreg  # Windows only; on macOS/Linux OLLAMA_* come from the process env already
 
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
             index = 0
@@ -184,7 +184,7 @@ def ollama_environment() -> dict:
                 if name.upper().startswith("OLLAMA_"):
                     env.setdefault(name, str(value))
                 index += 1
-    except OSError:
+    except (OSError, ImportError):
         pass
     return env
 
@@ -193,8 +193,12 @@ def ollama_executable() -> str | None:
     found = shutil.which("ollama")
     if found:
         return found
-    default = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
-    return str(default) if default.exists() else None
+    for default in (Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe",
+                    Path("/usr/local/bin/ollama"), Path("/opt/homebrew/bin/ollama"),
+                    Path.home() / ".ollama" / "ollama"):
+        if default.exists():
+            return str(default)
+    return None
 
 
 class OllamaProvider:

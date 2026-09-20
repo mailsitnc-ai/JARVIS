@@ -1,13 +1,21 @@
-"""ctypes bindings for the Win32 calls the window manager needs. No pywin32 required."""
+"""Win32 calls the window manager needs (no pywin32), with safe no-op fallbacks off Windows.
+
+On macOS/Linux the ctypes WinDLL bindings don't exist, so this module imports cleanly and the public
+functions return sane defaults: the JARVIS panel then runs as an ordinary window (no side-docking or
+focus-stealing, which are Windows-only). Those niceties would need AppKit/Accessibility on macOS.
+"""
 from __future__ import annotations
 
 import ctypes
+import sys
 from ctypes import wintypes
 from dataclasses import dataclass
 
-user32 = ctypes.WinDLL("user32", use_last_error=True)
+_WIN = sys.platform.startswith("win")
+
+user32 = ctypes.WinDLL("user32", use_last_error=True) if _WIN else None
 try:
-    dwmapi = ctypes.WinDLL("dwmapi")
+    dwmapi = ctypes.WinDLL("dwmapi") if _WIN else None
 except OSError:
     dwmapi = None
 
@@ -47,6 +55,8 @@ class WINDOWPLACEMENT(ctypes.Structure):
 
 
 def _bind(name, restype, *argtypes):
+    if not _WIN:
+        return lambda *a, **k: 0  # off-Windows: harmless stub; public fns below have real fallbacks
     fn = getattr(user32, name)
     fn.restype = restype
     fn.argtypes = list(argtypes)
@@ -81,6 +91,8 @@ if dwmapi is not None:
 
 def set_dpi_awareness() -> None:
     """Work in physical pixels so window math is exact on scaled displays."""
+    if not _WIN:
+        return
     try:
         fn = user32.SetProcessDpiAwarenessContext
         fn.restype = wintypes.BOOL
@@ -132,6 +144,8 @@ def toplevel(hwnd) -> int:
 
 def work_area(hwnd=None) -> Rect:
     """The usable area (screen minus taskbar) of the monitor holding hwnd."""
+    if not _WIN:
+        return Rect(0, 0, 1440, 900)  # off-Windows the panel doesn't dock; a default is enough
     monitor = _MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) if hwnd else \
         _MonitorFromPoint(wintypes.POINT(0, 0), MONITOR_DEFAULTTOPRIMARY)
     info = MONITORINFO()

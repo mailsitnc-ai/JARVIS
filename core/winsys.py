@@ -1,23 +1,9 @@
-"""Small Windows system queries used by doctor."""
+"""Small system queries used by doctor. Cross-platform via core.oslayer (Windows/macOS/Linux)."""
 from __future__ import annotations
 
-import ctypes
-from ctypes import wintypes
 from dataclasses import dataclass
 
-
-class _MemoryStatusEx(ctypes.Structure):
-    _fields_ = [
-        ("dwLength", wintypes.DWORD),
-        ("dwMemoryLoad", wintypes.DWORD),
-        ("ullTotalPhys", ctypes.c_ulonglong),
-        ("ullAvailPhys", ctypes.c_ulonglong),
-        ("ullTotalPageFile", ctypes.c_ulonglong),
-        ("ullAvailPageFile", ctypes.c_ulonglong),
-        ("ullTotalVirtual", ctypes.c_ulonglong),
-        ("ullAvailVirtual", ctypes.c_ulonglong),
-        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-    ]
+from .oslayer import memory_gb
 
 
 @dataclass
@@ -28,9 +14,8 @@ class MemoryStatus:
 
 
 def memory_status() -> MemoryStatus | None:
-    status = _MemoryStatusEx()
-    status.dwLength = ctypes.sizeof(status)
-    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+    values = memory_gb()
+    if values is None:
         return None
-    gb = 1024 ** 3
-    return MemoryStatus(status.ullTotalPhys / gb, status.ullAvailPhys / gb, int(status.dwMemoryLoad))
+    total, available, load = values
+    return MemoryStatus(total, available, load)

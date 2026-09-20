@@ -101,9 +101,15 @@ def cmd_skills(args) -> int:
 # ---- window / daemon ---------------------------------------------------------------------------
 
 def _spawn_daemon(show: bool) -> None:
+    from .oslayer import IS_WINDOWS
     argv = [_pythonw(), str(ROOT / "jarvis.py"), "daemon"] + (["--show"] if show else [])
-    subprocess.Popen(argv, cwd=str(ROOT), creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    kwargs = dict(cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL, close_fds=True)
+    if IS_WINDOWS:
+        kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True  # detach from the terminal so the daemon outlives it
+    subprocess.Popen(argv, **kwargs)
 
 
 def _control(command: str, start_if_missing: bool) -> int:
@@ -160,21 +166,54 @@ def _startup_link() -> Path:
     return Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "JARVIS.lnk"
 
 
+def _launch_agent_plist() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / "com.jarvis.daemon.plist"
+
+
 def cmd_startup(args) -> int:
-    link = _startup_link()
-    if args.action == "disable":
-        link.unlink(missing_ok=True)
-        print("JARVIS will no longer start at sign-in.")
+    from .oslayer import IS_MAC, IS_WINDOWS
+    if IS_WINDOWS:
+        link = _startup_link()
+        if args.action == "disable":
+            link.unlink(missing_ok=True)
+            print("JARVIS will no longer start at sign-in.")
+            return 0
+        if args.action == "status":
+            print(f"Start at sign-in: {'enabled' if link.exists() else 'disabled'}  ({link})")
+            return 0
+        script = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:J_LINK);"
+                  "$s.TargetPath=$env:J_TARGET;$s.Arguments=$env:J_ARGS;$s.WorkingDirectory=$env:J_DIR;"
+                  "$s.Description='JARVIS assistant';$s.Save()")
+        env = dict(os.environ, J_LINK=str(link), J_TARGET=_pythonw(), J_ARGS=f'"{ROOT / "jarvis.py"}" daemon', J_DIR=str(ROOT))
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], env=env, check=True)
+        print(f"JARVIS will start in the background at sign-in ({link}).")
         return 0
-    if args.action == "status":
-        print(f"Start at sign-in: {'enabled' if link.exists() else 'disabled'}  ({link})")
+    if IS_MAC:
+        plist = _launch_agent_plist()
+        if args.action == "disable":
+            subprocess.run(["launchctl", "unload", str(plist)], capture_output=True)
+            plist.unlink(missing_ok=True)
+            print("JARVIS will no longer start at login.")
+            return 0
+        if args.action == "status":
+            print(f"Start at login: {'enabled' if plist.exists() else 'disabled'}  ({plist})")
+            return 0
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0"><dict>\n'
+            '  <key>Label</key><string>com.jarvis.daemon</string>\n'
+            '  <key>ProgramArguments</key><array>'
+            f'<string>{_pythonw()}</string><string>{ROOT / "jarvis.py"}</string><string>daemon</string></array>\n'
+            f'  <key>WorkingDirectory</key><string>{ROOT}</string>\n'
+            '  <key>RunAtLoad</key><true/>\n'
+            '</dict></plist>\n', encoding="utf-8")
+        subprocess.run(["launchctl", "unload", str(plist)], capture_output=True)
+        subprocess.run(["launchctl", "load", str(plist)], capture_output=True)
+        print(f"JARVIS will start at login ({plist}).")
         return 0
-    script = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:J_LINK);"
-              "$s.TargetPath=$env:J_TARGET;$s.Arguments=$env:J_ARGS;$s.WorkingDirectory=$env:J_DIR;"
-              "$s.Description='JARVIS assistant';$s.Save()")
-    env = dict(os.environ, J_LINK=str(link), J_TARGET=_pythonw(), J_ARGS=f'"{ROOT / "jarvis.py"}" daemon', J_DIR=str(ROOT))
-    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], env=env, check=True)
-    print(f"JARVIS will start in the background at sign-in ({link}).")
+    print("Start-at-login isn't wired up for this platform yet; launch 'jarvis on' manually.")
     return 0
 
 
@@ -548,13 +587,13 @@ def cmd_config(args) -> int:
 
 
 def _user_env(name: str) -> str | None:
-    """A user-level environment variable as saved in the registry (what a newly started Ollama sees)."""
-    import winreg
-
+    """A user-level environment variable. On Windows read it from the registry (what a newly started
+    Ollama sees); elsewhere the process environment is authoritative."""
     try:
+        import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
             return str(winreg.QueryValueEx(key, name)[0])
-    except OSError:
+    except (OSError, ImportError):
         return os.environ.get(name)
 
 

@@ -17,13 +17,9 @@ SKILL = {'name': 'speak_text',
          'version': 2, 'origin': 'evolved'}
 
 def _build_powershell_command(text: str) -> list:
-    # Escape single quotes for PowerShell string literal
-    escaped = text.replace("'", "''")
-    ps_script = (
-        f"Add-Type -AssemblyName System.Speech; "
-        f"(New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{escaped}')"
-    )
-    return ["powershell", "-Command", ps_script]
+    # Cross-platform: Windows SAPI via PowerShell, macOS `say`, Linux `spd-say`.
+    from core.oslayer import speak_command
+    return speak_command(text)
 
 def run(request: str, context: dict) -> str:
     """

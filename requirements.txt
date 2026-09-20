@@ -1,0 +1,14 @@
+# JARVIS optional native features. The core assistant (chat, files, apps, Google, skills) needs NONE of
+# these - install only the features you want. JARVIS also auto-installs some of these on first use.
+
+# Camera capture, vision, hand-gesture control (Windows + macOS + Linux)
+opencv-python>=4.5
+
+# Real Chrome control over DevTools: browser automation, WhatsApp Web, Google Chat
+websocket-client>=1.0
+
+# macOS only: mouse-wheel scrolling for hand-gesture control
+pyobjc-framework-Quartz>=9.0 ; sys_platform == "darwin"
+
+# macOS/Linux: global hotkey to summon the panel (needs Accessibility permission on macOS)
+pynput>=1.7 ; sys_platform != "win32"

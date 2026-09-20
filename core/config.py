@@ -102,10 +102,8 @@ _MISSING = object()
 
 
 def user_dir() -> Path:
-    base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-    path = Path(base) / "JARVIS"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    from .oslayer import user_data_dir  # platform-correct: %APPDATA% on Windows, ~/Library on macOS
+    return user_data_dir()
 
 
 def user_config_path() -> Path:

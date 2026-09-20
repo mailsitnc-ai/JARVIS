@@ -125,27 +125,8 @@ class ChromeController:
     def _chrome_path(self) -> str | None:
         if self.chrome_exe and Path(self.chrome_exe).exists():
             return self.chrome_exe
-        found = shutil.which("chrome") or shutil.which("chrome.exe")
-        if found:
-            return found
-        try:
-            import winreg
-            subkey = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"
-            for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-                try:
-                    with winreg.OpenKey(root, subkey) as handle:
-                        value = winreg.QueryValueEx(handle, "")[0]
-                        if value and Path(value).exists():
-                            return value
-                except OSError:
-                    continue
-        except ImportError:
-            pass
-        for guess in (r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                      r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"):
-            if Path(guess).exists():
-                return guess
-        return None
+        from .oslayer import chrome_path
+        return chrome_path()
 
     def _version(self):
         try:
@@ -161,7 +142,11 @@ class ChromeController:
         exe = self._chrome_path()
         if not exe:
             raise BrowserError("I couldn't find Chrome on this PC to control.")
-        profile = self.profile_dir or str(Path(os.environ.get("APPDATA", str(Path.home()))) / "JARVIS" / "chrome-debug")
+        if self.profile_dir:
+            profile = self.profile_dir
+        else:
+            from .oslayer import user_data_dir
+            profile = str(user_data_dir() / "chrome-debug")
         Path(profile).mkdir(parents=True, exist_ok=True)
         args = [exe, f"--remote-debugging-port={self.port}", f"--user-data-dir={profile}",
                 "--remote-allow-origins=*",  # newer Chrome blocks DevTools websockets otherwise

@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import ctypes
 import re
+import sys
 import threading
 import time
 from ctypes import wintypes
 from typing import Callable, Optional
+
+_WIN = sys.platform.startswith("win")
 
 try:
     import numpy as np
@@ -148,6 +151,10 @@ class HotkeyListener(threading.Thread):
             self._detect_claps()
             return
 
+        if not _WIN:
+            self._run_non_windows()
+            return
+
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         kernel32 = ctypes.WinDLL("kernel32")
         user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
@@ -185,7 +192,46 @@ class HotkeyListener(threading.Thread):
         finally:
             user32.UnregisterHotKey(None, self.hotkey_id)
 
+    def _pynput_combo(self, spec: str) -> str | None:
+        """Turn 'ctrl+alt+j' into pynput's '<ctrl>+<alt>+j' form."""
+        mods = {"ctrl": "<ctrl>", "control": "<ctrl>", "alt": "<alt>", "option": "<alt>",
+                "shift": "<shift>", "cmd": "<cmd>", "command": "<cmd>", "win": "<cmd>", "super": "<cmd>"}
+        parts = [p.strip() for p in spec.split("+") if p.strip()]
+        if not parts:
+            return None
+        return "+".join(mods.get(p, p) for p in parts)
+
+    def _run_non_windows(self) -> None:
+        """macOS/Linux global hotkey via pynput (needs Accessibility permission on macOS). Degrades to a
+        clear error if pynput isn't installed, without crashing the daemon."""
+        try:
+            from pynput import keyboard
+        except Exception:
+            self.error = ("global hotkey needs 'pynput' on macOS/Linux (pip install pynput) "
+                          "and Accessibility permission")
+            self.ready.set()
+            return
+        combo = self._pynput_combo(self.spec)
+        if not combo:
+            self.error = f"couldn't parse hotkey {self.spec!r}"
+            self.ready.set()
+            return
+        try:
+            self._listener = keyboard.GlobalHotKeys({combo: self.callback})
+            self._listener.start()
+            self.ready.set()
+            self._listener.join()
+        except Exception as exc:
+            self.error = f"hotkey unavailable: {exc}"
+            self.ready.set()
+
     def stop(self) -> None:
         """Stop the listener thread."""
-        if self._thread_id:
+        listener = getattr(self, "_listener", None)
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception:
+                pass
+        if _WIN and self._thread_id:
             ctypes.windll.user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)

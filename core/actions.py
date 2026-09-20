@@ -34,6 +34,26 @@ from pathlib import Path
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _MAX_READ = 200_000
 
+_OSLAYER = None
+
+
+def _osl():
+    """core.oslayer, loaded so it works both as a normal package import AND standalone in the sandbox
+    (which runs this file by path under `python -I`, with nothing else from JARVIS importable). oslayer
+    imports only the standard library, so loading it by path there is safe."""
+    global _OSLAYER
+    if _OSLAYER is not None:
+        return _OSLAYER
+    try:
+        from . import oslayer as mod
+    except Exception:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_oslayer", Path(__file__).with_name("oslayer.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    _OSLAYER = mod
+    return mod
+
 # Runs a .py inside a console that stays open: shows the program's output, or its full traceback if it
 # crashed, then waits for a keypress - so a script that finishes (or errors) doesn't just flash and vanish.
 _HOLD_CONSOLE = (
@@ -281,14 +301,7 @@ class ActionBroker:
     # ---- open ---------------------------------------------------------------------------------
 
     def _launch(self, candidates) -> bool:
-        for candidate in candidates:
-            target = candidate if candidate.endswith(":") else (shutil.which(candidate) or candidate)
-            try:
-                os.startfile(target)  # noqa: S606 - the documented Windows way to open by association
-                return True
-            except OSError:
-                continue
-        return False
+        return _osl().launch_candidates(candidates)
 
     def _app_paths_exe(self, key: str) -> str | None:
         """The registered path for <key>.exe, from the Windows App Paths registry."""
@@ -326,7 +339,7 @@ class ActionBroker:
 
     def _resolve_app(self, name: str):
         key = re.sub(r"\s+(?:app|application|program|browser)$", "", str(name).strip().lower())
-        if key in APPS:
+        if _osl().IS_WINDOWS and key in APPS:  # APPS holds Windows exes/URIs; macOS resolves via oslayer
             return APPS[key]
         if key in FOLDERS:
             return f"{FOLDERS[key]} folder", [str(Path.home() / FOLDERS[key])]
@@ -348,6 +361,17 @@ class ActionBroker:
         name = strip_browser_suffix(name)  # "google docs on my chrome" -> "google docs"
         resolved = self._resolve_app(name)
         if not resolved:
+            if not self.dry_run and _osl().mac_app_exists(name):  # macOS app by display name (Safari, Notes...)
+                label = name.strip().title()
+                req = ActionRequest("open", f"Open {label}", details=name)
+
+                def do_app():
+                    if not _osl().open_app(name):
+                        return f"I couldn't open {label}."
+                    self.remember_focus("app", name)
+                    return f"Opening {label}."
+
+                return self._gated(req, do_app, f"Would open {label}.")
             url = web_url_for(name)  # google docs, gmail, youtube, a bare domain...
             if url is None:
                 url = guess_site_url(name)  # "open toddle" -> https://toddle.com (unknown one-word name)
@@ -410,7 +434,7 @@ class ActionBroker:
         def do():
             if not target.exists():
                 return f"There's nothing at {target}."
-            os.startfile(str(target))
+            _osl().open_path(str(target))
             is_image = target.suffix.lower().lstrip(".") in _FILE_CATEGORIES["Images"]
             self.remember_focus("image" if is_image else "file", target)
             return f"Opening {target}."
@@ -425,7 +449,7 @@ class ActionBroker:
         def do():
             if not target.exists():
                 return f"There's nothing at {target}."
-            subprocess.run(["explorer", f"/select,{target}"], creationflags=_NO_WINDOW)  # explorer returns non-zero on success
+            _osl().reveal_in_folder(str(target))
             return f"Showing {target.name} in {target.parent}."
 
         return self._gated(req, do, f"Would show {target} in its folder.")
@@ -459,20 +483,9 @@ class ActionBroker:
         req = ActionRequest("screen", "Capture the screen", details=str(target))
 
         def do():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            script = (
-                "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
-                "$b=[System.Windows.Forms.SystemInformation]::VirtualScreen;"
-                "$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height;"
-                "$g=[System.Drawing.Graphics]::FromImage($bmp);"
-                "$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size);"
-                f"$bmp.Save('{target}',[System.Drawing.Imaging.ImageFormat]::Png);$g.Dispose();$bmp.Dispose()"
-            )
-            result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                                    creationflags=_NO_WINDOW, timeout=30,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-            if result.returncode != 0 or not target.exists():
-                return f"Screenshot failed: {(result.stderr or '').strip()[:200] or 'unknown error'}"
+            ok, err = _osl().screenshot(target)
+            if not ok:
+                return f"Screenshot failed: {err}"
             self._remember_screenshot(target)
             self.remember_focus("image", target)  # "open it" / "read the screenshot" -> this capture
             return f"Screenshot saved to {target}"
@@ -1052,17 +1065,9 @@ class ActionBroker:
         req = ActionRequest("notify", f"Show a popup: {title}", details=message[:200])
 
         def do():
-            def q(text):  # single-quote for PowerShell; drop newlines the dialog can't take inline
-                return re.sub(r"\s*\n\s*", " ", text).replace("'", "''")
-
-            script = ("Add-Type -AssemblyName System.Windows.Forms;"
-                      f"[System.Windows.Forms.MessageBox]::Show('{q(message)}','{q(title)}',"
-                      "'OK','Information') | Out-Null")
-            try:
-                subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                                 creationflags=_NO_WINDOW)
-            except OSError as exc:
-                return f"Couldn't show the popup: {exc}"
+            ok, err = _osl().notify(message, title)
+            if not ok:
+                return f"Couldn't show the popup: {err}"
             return f"Popup shown: {title}"
 
         return self._gated(req, do, f"Would show a popup titled {title!r}.")
@@ -1076,24 +1081,10 @@ class ActionBroker:
         req = ActionRequest("run_command", f"Run {target.name}", details=str(target))
 
         def do():
-            if not target.is_file():
-                return f"There's nothing at {target}."
-            exe = sys.executable
-            if target.suffix.lower() == ".pyw":                     # GUI: pythonw, no console
-                pyw = Path(exe).with_name("pythonw.exe")
-                exe = str(pyw) if pyw.exists() else exe
-                args = [exe, str(target)]
-                flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                stdio = subprocess.DEVNULL
-            else:  # script: run inside a wrapper so the window doesn't vanish when the script ends/crashes
-                args = [exe, "-c", _HOLD_CONSOLE, str(target)]
-                flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-                stdio = None
-            try:
-                subprocess.Popen(args, cwd=str(target.parent), creationflags=flags,
-                                 stdin=stdio, stdout=stdio, stderr=stdio, close_fds=True)
-            except OSError as exc:
-                return f"Couldn't run {target.name}: {exc}"
+            os_layer = _osl()
+            ok, err = os_layer.launch_python(target, gui=os_layer.is_gui_python(target))
+            if not ok:
+                return f"Couldn't run {target.name}: {err}"
             return f"Running {target.name}."
 
         return self._gated(req, do, f"Would run {target.name}.")

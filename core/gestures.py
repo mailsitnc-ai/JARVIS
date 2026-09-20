@@ -54,11 +54,8 @@ class GestureController:
     # ---- actions ------------------------------------------------------------------------------
 
     def _scroll(self, up: bool):
-        try:
-            import ctypes
-            ctypes.windll.user32.mouse_event(0x0800, 0, 0, int(self.scroll_delta if up else -self.scroll_delta), 0)
-        except Exception:
-            pass
+        from core.oslayer import scroll
+        scroll(self.scroll_delta, up)  # OS-level wheel event: Windows mouse_event / macOS Quartz
 
     def _fire_async(self, fn, *args):
         threading.Thread(target=fn, args=args, daemon=True).start()

@@ -1,6 +1,8 @@
-"""Speak text aloud with the Windows built-in text-to-speech voice."""
+"""Speak text aloud with the system text-to-speech voice (Windows SAPI / macOS `say`)."""
 import re
 import subprocess
+
+from core.oslayer import speak_command
 
 SKILL = {
     "name": "speak",
@@ -35,12 +37,9 @@ def run(request, context):
         return "What should I say?"
     if context.get("dry_run"):
         return f'Would say: "{text}"'
-    script = ("Add-Type -AssemblyName System.Speech;"
-              "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-              f"$s.Speak('{text.replace(chr(39), chr(39) * 2)}')")
     try:
-        result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                                creationflags=_NO_WINDOW, timeout=60, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(speak_command(text), creationflags=_NO_WINDOW, timeout=60,
+                                stderr=subprocess.PIPE, text=True)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"I couldn't speak: {exc}"
     if result.returncode != 0:
