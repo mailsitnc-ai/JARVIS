@@ -564,7 +564,10 @@ def cmd_setkey(args) -> int:
         return 1
     keystore.store_key(provider, key)
     settings = load_settings()
-    print(f"Stored the {provider} key for this Windows account, encrypted with DPAPI.")
+    from .oslayer import IS_WINDOWS
+    how = "for this Windows account, encrypted with DPAPI" if IS_WINDOWS \
+        else "in a user-only file (obfuscated, not encrypted - prefer the env var for anything sensitive)"
+    print(f"Stored the {provider} key {how}.")
     print(f"Provider selection is unchanged: provider={settings.get('llm.provider')}, "
           f"order={' > '.join(settings.get('llm.fallback_order') or [])}")
     return 0
