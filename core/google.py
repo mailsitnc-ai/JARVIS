@@ -77,15 +77,15 @@ def _load() -> dict:
         data = json.loads(_store_path().read_text(encoding="utf-8"))
         blob = data.get("dpapi") if isinstance(data, dict) else None
         if blob:
-            return json.loads(keystore._dpapi(base64.b64decode(blob), protect=False).decode("utf-8"))
+            return json.loads(keystore._decode(blob))  # DPAPI on Windows, obfuscated file elsewhere
     except (OSError, ValueError):
         pass
     return {}
 
 
 def _save(data: dict) -> None:
-    encrypted = base64.b64encode(keystore._dpapi(json.dumps(data).encode("utf-8"), protect=True)).decode("ascii")
-    write_json_atomic(_store_path(), {"dpapi": encrypted})
+    # keystore._encode: DPAPI-encrypt on Windows (byte-identical to before), base64-obfuscate elsewhere.
+    write_json_atomic(_store_path(), {"dpapi": keystore._encode(json.dumps(data))})
 
 
 def _post_token(fields: dict) -> dict:
