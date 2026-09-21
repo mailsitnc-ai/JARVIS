@@ -1,0 +1,19 @@
+- [Windows laptop specs](windows-laptop-specs.md) — 3.9 GB RAM, 2012 i5 (AVX, no AVX2), AZERTY, Python 3.13 per-user path
+- [JARVIS Windows rebuild](jarvis-windows-rebuild.md) — port of erased Mac build; local-only Ollama qwen2.5-coder:0.5b-instruct-q8_0, no cloud APIs
+- [Build from pasted spec](build-from-pasted-spec.md) — don't over-probe; Mac in old chats means build for Windows
+- [Ollama server spawn limit](ollama-server-spawn-limit.md) — tool shells can't let the Ollama tray app start its server; run `ollama serve` directly
+- [JARVIS agentic loop](jarvis-agentic-loop.md) — multi-step tasks run an act-observe-adapt agent (core/agent.py), not a fixed plan
+- [Arc reactor UI](jarvis-arc-reactor-ui.md) — panel is an animated Tk arc reactor + skills manager window
+- [Google integration](jarvis-google-integration.md) — Drive/Gmail read via OAuth; needs the user's own OAuth client
+- [Code, apps & popups](jarvis-code-apps-popups.md) — write_file skill (generates+saves+opens code/apps), popup skill + notify capability
+- [Interrupt hotkey](jarvis-interrupt-hotkey.md) — Ctrl+Alt+C stops the current task (cooperative cancellation); `jarvis interrupt`
+- [Self-editing](jarvis-self-editing.md) — JARVIS rewrites its OWN core source on command (`jarvis edit-self`); ast-checked, test-gated, auto-rollback
+- [Model usage & switching](jarvis-model-usage-switching.md) — `jarvis usage` per-model calls/tokens; `jarvis model <name>` switch live (+ panel ◆ button, /model, /usage)
+- [Camera & vision](jarvis-camera-vision.md) — webcam capture + screen/browser observation, command-gated (camera exempt from autonomy); vision via Gemini (user's gemini key is 403-denied — needs a fresh one)
+- [Autonomous agenda](jarvis-autonomous-agenda.md) — scheduled tasks/goals JARVIS runs on its own + self-reflection loop (`jarvis agenda`); gated by autonomy
+- [Autonomy + self-improvement](jarvis-autonomy-and-self-improvement.md) — `jarvis autonomy on` unleash switch; JARVIS can rewrite its own evolved skills (left ON on user's machine)
+- [Conversation context](jarvis-conversation-context.md) — focus store + reference resolver so "open it"/"the photo" keep context across turns (core/focus.py, core/refs.py)
+- [Browser DOM control](jarvis-browser-dom-control.md) — real Chrome control via DevTools (browse/read/click/type/JS), gated by 'browser' (core/browser.py, browser_control skill)
+- [Messaging send](jarvis-messaging-send.md) — WhatsApp/Google Chat by contact OR group/space name; message_send always confirms; speak_text trigger no longer hijacks messages
+- [Broad-trigger hijack](jarvis-broad-trigger-hijack.md) — evolved junk skills with single-word triggers shadowed the Google/built-in skills; contract now blocks bare-word triggers for evolved skills
+- [macOS port](jarvis-macos-port.md) — JARVIS is now cross-platform (core/oslayer.py); pushed to github.com/mailsitnc-ai/JARVIS for the MacBook
