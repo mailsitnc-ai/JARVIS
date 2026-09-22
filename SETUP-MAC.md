@@ -62,6 +62,8 @@ The first time each is used, macOS will prompt — or grant them ahead of time t
 Python app:
 
 - **Screen Recording** — for `screenshot` / "what's on my screen".
+- **Microphone** — for voice: say "Jarvis, …" (speech is recognised on the Mac with faster-whisper;
+  nothing that isn't addressed to JARVIS is kept). Turn on with `/voice on` or `jarvis config --set voice.enabled=true`.
 - **Camera** — for photos, vision, hand-gesture control. For accurate hand tracking on Apple Silicon, install
   `mediapipe==0.10.21` and the `hand_landmarker.task` model (exact commands in `requirements-extras.txt`);
   without them hand control falls back to skin-colour detection.

@@ -16,6 +16,7 @@ import json
 from dataclasses import dataclass, field
 
 from evolution_engine.analyzer import extract_json
+from .oslayer import platform_key, platform_phrase
 
 # Settings the user is allowed to change by talking. Everything else is ignored for safety.
 ALLOWED_SETTINGS = {
@@ -24,7 +25,7 @@ ALLOWED_SETTINGS = {
 }
 
 UNDERSTAND_SYSTEM = (
-    "You are the understanding layer of JARVIS, an assistant on the user's Windows PC. Read the latest "
+    "You are the understanding layer of JARVIS, an assistant on the user's " + platform_phrase() + ". Read the latest "
     "message (with the conversation for context) and classify it. Reply with ONLY a JSON object:\n"
     '{"intent": "chat|act|preference", "reply": "...", "steps": ["..."], '
     '"setting": "", "value": null, "summary": "..."}\n'

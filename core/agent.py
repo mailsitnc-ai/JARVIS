@@ -8,9 +8,10 @@ inherits permissions, network, package install and self-repair for free. Cloud-m
 from __future__ import annotations
 
 from evolution_engine.analyzer import extract_json
+from .oslayer import platform_key, platform_phrase
 
 AGENT_SYSTEM = (
-    "You are JARVIS carrying out a task on the user's Windows PC, one step at a time. You get the goal, a "
+    "You are JARVIS carrying out a task on the user's " + platform_phrase() + ", one step at a time. You get the goal, a "
     "suggested plan, and the results of the steps already run. Decide the SINGLE next instruction to run, "
     "or finish.\n"
     "- Each instruction is one plain command JARVIS can run with a skill: e.g. 'open notepad', 'get the "

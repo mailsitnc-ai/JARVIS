@@ -72,7 +72,7 @@ def main():
             "llm": lambda prompt, **_kw: "[LLM unavailable during sandbox verification]",
             "run": lambda *_a, **_kw: "[sub-skill unavailable during sandbox verification]",
             "memory": [],
-            "platform": "windows",
+            "platform": {"darwin": "macos", "win32": "windows"}.get(sys.platform, "linux"),
             "skills": [],
             "emit": lambda *_a, **_kw: None,
         }

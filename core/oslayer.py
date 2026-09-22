@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import re
 import subprocess
 import sys
 import time
@@ -32,6 +33,15 @@ def _popen(args, **kw):
 
 
 # ---- per-user data directory ------------------------------------------------------------------
+
+def platform_phrase() -> str:
+    """How prompts describe this machine to the model ("Mac (macOS)", "Windows PC", "Linux PC")."""
+    return "Mac (macOS)" if IS_MAC else ("Windows PC" if IS_WINDOWS else "Linux PC")
+
+
+def platform_key() -> str:
+    return "macos" if IS_MAC else ("windows" if IS_WINDOWS else "linux")
+
 
 def user_data_dir() -> Path:
     """Where JARVIS keeps its config/state/keys: %APPDATA%\\JARVIS on Windows,
@@ -285,6 +295,40 @@ def scroll_pixels(pixels: int, up: bool) -> None:
         scroll(max(1, int(pixels * 1.2)), up)
     else:
         scroll(100, up)
+
+
+# ---- battery -----------------------------------------------------------------------------------
+
+def battery() -> tuple[int, bool] | None:
+    """(percent, plugged_in) or None when there's no battery / it can't be read."""
+    try:
+        if IS_MAC:
+            out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=5).stdout
+            m = re.search(r"(\d+)%", out)
+            if not m:
+                return None
+            plugged = "AC Power" in out or bool(re.search(r"\bcharging\b|\bcharged\b", out, re.I)) \
+                and "discharging" not in out.lower()
+            return int(m.group(1)), plugged
+        if IS_WINDOWS:
+            import ctypes
+            from ctypes import wintypes
+
+            class _PS(ctypes.Structure):
+                _fields_ = [("ACLineStatus", ctypes.c_ubyte), ("BatteryFlag", ctypes.c_ubyte),
+                            ("BatteryLifePercent", ctypes.c_ubyte), ("SystemStatusFlag", ctypes.c_ubyte),
+                            ("BatteryLifeTime", wintypes.DWORD), ("BatteryFullLifeTime", wintypes.DWORD)]
+            st = _PS()
+            if not ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(st)) or st.BatteryLifePercent == 255:
+                return None
+            return int(st.BatteryLifePercent), st.ACLineStatus == 1
+        base = Path("/sys/class/power_supply/BAT0")
+        if base.exists():
+            return int((base / "capacity").read_text().strip()), \
+                (base / "status").read_text().strip().lower() != "discharging"
+    except Exception:
+        pass
+    return None
 
 
 # ---- mouse pointer (hand control) --------------------------------------------------------------

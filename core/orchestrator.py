@@ -33,6 +33,7 @@ from .llm_router import LLMError, LLMRouter
 from .permissions import PermissionRegistry
 from .refs import resolve_references
 from .skill_loader import Skill, SkillRegistry
+from .oslayer import platform_key, platform_phrase
 
 
 # Split "open X and then do Y" into steps; strip leading filler from each ("and", "then", "operate"...).
@@ -41,8 +42,11 @@ _FILLER = re.compile(r"^(?:and\s+|then\s+|also\s+|next\s+|after\s+that\s+|please
                      r"could\s+you\s+|go\s+|just\s+|do\s+|operate\s+|calculate\s+|compute\s+|solve\s+|"
                      r"evaluate\s+|work\s+out\s+)+", re.IGNORECASE)
 
-CHAT_SYSTEM = ("You are JARVIS, a concise, friendly assistant running on the user's Windows PC. "
-               "Chat naturally and briefly. If the user seems to want a task done, offer to do it.")
+CHAT_SYSTEM = (f"You are JARVIS, the user's personal AI assistant, running on their {platform_phrase()}. "
+               "Your manner is that of the JARVIS from the films: calm, composed, precise, quietly witty and "
+               "unfailingly polite - a trace of dry British humour, never goofy. Address the user as 'sir' "
+               "now and then (not every sentence). Be brief: one to three sentences unless asked for more. "
+               "If the user seems to want a task done, offer to do it.")
 
 # A messaging command whose body has commas ("...saying hi, everyone") must NOT be treated as a
 # multi-step chain or handed to evolution - it goes straight to the whatsapp/google_chat skill. We
@@ -781,7 +785,7 @@ class Jarvis:
         broker = ActionBroker(dry_run=False, permissions=self.permissions, confirm=self.confirm, emit=self._emit,
                               state_dir=self._state_dir, browser=self.settings.get("window.browser", "chrome"),
                               browser_port=int(self.settings.get("window.debug_port", 9222)))
-        return {"dry_run": False, "llm": ask_llm, "memory": recalled, "platform": "windows",
+        return {"dry_run": False, "llm": ask_llm, "memory": recalled, "platform": platform_key(),
                 "emit": self._emit, "root": str(ROOT), "actions": broker, "permissions": self.permissions,
                 "run": lambda sub: self._subrun(sub, depth), "skills": sorted(self.registry.skills),
                 "focus": self._focus.snapshot()}

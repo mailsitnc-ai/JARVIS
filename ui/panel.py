@@ -37,6 +37,7 @@ HELP = """Commands
   /autonomy on|off  unleash / re-gate /lessons  what JARVIS learned
   /model [name]  show/switch the model  /usage    model usage per model
   /agenda       scheduled tasks JARVIS runs on its own (manage from: jarvis agenda)
+  /voice on|off  talk to JARVIS ("Jarvis, ...") - on-device speech, spoken replies
   /clear        clear this panel (or Ctrl+Shift+3)    /hide  hide JARVIS (or Esc)
 Anything else is a request. If no skill can handle it, JARVIS builds one.
 By default actions on your PC ask for approval. Turn on autonomy (🔥 header button) to let it act freely.
@@ -257,6 +258,26 @@ class JarvisPanel:
             self.events.put(("status", None))
         except Exception:
             self.events.put(("error", "JARVIS failed to start:\n" + traceback.format_exc(limit=4)))
+            return
+        try:
+            from core import voice
+            voice.configure(on_command=lambda text: self.events.put(("voice", text)),
+                            on_state=lambda state, detail=None: self.events.put(("voice_state", (state, detail))),
+                            settings=self.settings)
+            if self.settings.get("voice.enabled", False):
+                self.events.put(("event", voice.start()))
+                if self.settings.get("voice.greet_on_start", True):
+                    import datetime as _dt
+                    from core.briefing import greeting
+                    self._say(f"{greeting(_dt.datetime.now())}, sir. JARVIS online.")
+        except Exception as exc:
+            self.events.put(("event", f"Voice unavailable: {exc}"))
+        try:
+            from core import sentinel
+            sentinel.start(self.settings, emit=lambda text: self.events.put(("event", f"⚠ {text}")),
+                           speak=self._say)
+        except Exception as exc:
+            self.events.put(("event", f"Alerts unavailable: {exc}"))
 
     def _confirm_action(self, req) -> str:
         """Called on a worker thread: ask the panel to show approval buttons, then block for the answer."""
@@ -266,16 +287,41 @@ class JarvisPanel:
         answered.wait(timeout=180)
         return box["decision"]
 
-    def _work(self, text: str) -> None:
+    def _work(self, text: str, spoken: bool = False) -> None:
         try:
             reply, job = self.jarvis.submit(text)
             self.events.put(("reply", reply))
+            self._maybe_speak(reply, spoken)
             if job is not None:
                 # A skill is being built off-thread; the panel is already free for the next message.
                 result = job()
                 self.events.put(("reply", result))
+                self._maybe_speak(result, spoken)
         except Exception:
             self.events.put(("error", traceback.format_exc(limit=4)))
+            if spoken:
+                self._say("Sorry, sir, something went wrong. The details are in the panel.")
+
+    def _say(self, text: str) -> None:
+        try:
+            from core import voice
+            spk = voice.speaker()
+            if spk is not None:
+                spk.say(text)
+        except Exception:
+            pass
+
+    def _maybe_speak(self, reply, spoken: bool) -> None:
+        """Answer aloud when you spoke to JARVIS (voice.speak_replies = voice | always | never)."""
+        mode = str(self.settings.get("voice.speak_replies", "voice") or "voice").lower()
+        if mode == "never" or (mode == "voice" and not spoken):
+            return
+        if getattr(reply, "skill", None) in ("speak", "speak_text"):
+            return                                   # it already said it
+        text = getattr(reply, "text", "") or ""
+        if getattr(reply, "route", "") == "building":
+            text = "On it, sir. I'm building that capability now - I'll tell you when it's ready."
+        self._say(text)
 
     def _pump(self) -> None:
         try:
@@ -319,6 +365,24 @@ class JarvisPanel:
                         self._write("  · Interrupting - stopping at the next step...\n", "event")
                     elif self.jarvis is not None:
                         self._write("  · Nothing running to interrupt.\n", "event")
+                elif kind == "voice":
+                    self._on_voice(payload)
+                elif kind == "voice_state":
+                    state, detail = payload
+                    log.info("voice: %s %s", state, detail or "")
+                    if state == "listening":
+                        self._write("  🎙 Listening - say \"Jarvis\" and your request.\n", "event")
+                    elif state == "loading":
+                        self._write("  🎙 Loading on-device speech recognition... (if macOS asks for the "
+                                    "microphone, click Allow)\n", "event")
+                    elif state == "downloading":
+                        self._write("  🎙 Downloading the speech model once (~140 MB)...\n", "event")
+                    elif state == "awake":
+                        self._set_reactor("speaking", revert_ms=1500)
+                    elif state == "off":
+                        self._write("  🎙 Stopped listening.\n", "event")
+                    elif state == "error":
+                        self._write(f"  🎙 {detail}\n", "error")
                 elif kind == "agenda_done":
                     title, result = payload
                     self._write(f"  ⏱ {title}: {result}\n", "event")
@@ -337,6 +401,15 @@ class JarvisPanel:
         self.root.after(40, self._pump)
 
     def _ask_permission(self, req, box, answered) -> None:
+        try:
+            from core import voice
+            if voice.listening():
+                self._say("I need your approval on screen for that, sir.")
+        except Exception:
+            pass
+        self._ask_permission_ui(req, box, answered)
+
+    def _ask_permission_ui(self, req, box, answered) -> None:
         if not self.visible:
             self.show(None)
         self._write(f"  · JARVIS is asking permission: {req.summary}\n", "event")
@@ -394,6 +467,24 @@ class JarvisPanel:
             self._set_reactor("busy")
             threading.Thread(target=self._work, args=(text,), name="jarvis-request", daemon=True).start()
         return "break"
+
+    def _on_voice(self, text: str) -> None:
+        if text == "__stop__":
+            if self.jarvis is not None and self.busy:
+                self.jarvis.interrupt()
+                self._write("  · Interrupting - stopping at the next step...\n", "event")
+            return
+        if self.jarvis is None:
+            self._say("One moment, sir, I'm still starting up.")
+            return
+        if self.busy:
+            self._say("One moment, sir, I'm still on the last task.")
+            return
+        self._write("You 🎙  ", "label")
+        self._write(f"{text}\n", "user")
+        self.busy = True
+        self._set_reactor("busy")
+        threading.Thread(target=self._work, args=(text, True), name="jarvis-voice-request", daemon=True).start()
 
     def _recall(self, step: int):
         if not self.history:
@@ -458,6 +549,17 @@ class JarvisPanel:
                 self._refresh_autonomy_btn()
             state = "ON - acting without asking" if perms.autonomy() else "OFF - asking before each capability"
             self._write(f"  autonomy is {state}   (use: /autonomy on|off)\n", "event")
+        elif command == "/voice":
+            from core import voice
+            arg = text.split()[1].lower() if len(text.split()) > 1 else ""
+            if arg in ("on", "start"):
+                self._write(f"  🎙 {voice.start()}\n", "event")
+            elif arg in ("off", "stop"):
+                self._write(f"  🎙 {voice.stop()}\n", "event")
+            else:
+                self._write(f"  🎙 Voice is {'ON' if voice.listening() else 'off'}. /voice on | /voice off  "
+                            "(or say 'start listening'). Start with JARVIS: jarvis config --set voice.enabled=true\n",
+                            "event")
         elif command == "/model":
             if self.jarvis is None:
                 self._write("Still starting up, one moment.\n", "event")

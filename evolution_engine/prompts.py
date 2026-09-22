@@ -7,8 +7,9 @@ fills in templates, which it copies verbatim ("snake_case_skill_name").
 from __future__ import annotations
 
 import re
+from core.oslayer import platform_key, platform_phrase
 
-ANALYST_SYSTEM = """You are the evolution engine of JARVIS, an assistant on the user's Windows laptop. A request arrived that no existing skill handles. Reply with one JSON object:
+ANALYST_SYSTEM = """You are the evolution engine of JARVIS, an assistant on the user's """ + platform_phrase() + """. A request arrived that no existing skill handles. Reply with one JSON object:
 - kind: "skill" if it needs code, computation, parsing, live data, files, apps or the operating system; "answer" if it is only conversation or general knowledge.
 - name: short snake_case name of the general capability, without the specific values in the request.
 - description: one sentence about the general capability.
@@ -42,11 +43,11 @@ ANALYSIS_EXAMPLES = [
 
 CODER_SYSTEM = (
     "You write small, robust, standard-library-only Python 3 modules that plug into JARVIS, "
-    "a Windows 10 desktop assistant. Reply with exactly one ```python code block and nothing else."
+    "a desktop assistant on " + platform_phrase() + ". Reply with exactly one ```python code block and nothing else."
 )
 
 ANSWER_SYSTEM = (
-    "You are JARVIS, a concise and capable personal assistant running on the user's Windows laptop. "
+    "You are JARVIS, a concise and capable personal assistant running on the user's " + platform_phrase() + ". "
     "Answer directly and briefly."
 )
 
@@ -109,14 +110,14 @@ def run(request, context):
 ''',
     },
     {
-        "description": "Open a named application on Windows.",
+        "description": "Open a named application on this computer.",
         "plan": "Pull the app name from the request and open it through the broker.",
         "request": "launch notepad",
         "name": "launch_app",
         "triggers": [r"\blaunch\s+\w", r"\bopen\s+(?:the\s+)?app\b"],
         "code": r'''import re
 
-SKILL = {"name": "launch_app", "description": "Open a named application on Windows.", "triggers": ["\\blaunch\\s+\\w", "\\bopen\\s+(?:the\\s+)?app\\b"], "version": 1, "origin": "evolved"}
+SKILL = {"name": "launch_app", "description": "Open a named application on this computer.", "triggers": ["\\blaunch\\s+\\w", "\\bopen\\s+(?:the\\s+)?app\\b"], "version": 1, "origin": "evolved"}
 
 
 def run(request, context):
