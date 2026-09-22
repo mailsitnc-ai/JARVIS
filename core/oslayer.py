@@ -35,8 +35,12 @@ def _popen(args, **kw):
 
 def user_data_dir() -> Path:
     """Where JARVIS keeps its config/state/keys: %APPDATA%\\JARVIS on Windows,
-    ~/Library/Application Support/JARVIS on macOS, ~/.config/JARVIS on Linux."""
-    if IS_WINDOWS:
+    ~/Library/Application Support/JARVIS on macOS, ~/.config/JARVIS on Linux. JARVIS_DATA_DIR overrides
+    it (the test suite sets it so tests can never touch the real keys/config)."""
+    override = os.environ.get("JARVIS_DATA_DIR", "").strip()
+    if override:
+        path = Path(override)
+    elif IS_WINDOWS:
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
         path = Path(base) / "JARVIS"
     elif IS_MAC:

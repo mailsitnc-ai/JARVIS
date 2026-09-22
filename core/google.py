@@ -226,9 +226,9 @@ class GoogleClient:
         except GoogleError as exc:
             reason = getattr(self.auth, "last_error", None) or str(exc)
             if "client" in str(reason).lower():
-                raise GoogleError("Google rejected JARVIS's OAuth client (it was deleted or disabled in "
-                                  "Google Cloud Console). Create a new Desktop OAuth client, then run: "
-                                  "jarvis google setup  and  jarvis google login") from exc
+                raise GoogleError("Google rejected JARVIS's OAuth client ID/secret. Run  jarvis google setup  "
+                                  "with the client ID and secret from Google Cloud Console (make a new Desktop "
+                                  "client if yours was deleted), then  jarvis google login") from exc
             raise GoogleError(f"Google sign-in expired ({reason}). Run: jarvis google login") from exc
 
     def _get(self, *args, **kwargs):

@@ -4,6 +4,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+# Point JARVIS's data dir (config, API keys, Google login, permissions, usage) at a throwaway folder for
+# the WHOLE test run, before any test executes. Without this, tests that store fake keys/config wrote
+# straight into the real ~/Library/Application Support/JARVIS on macOS (only %APPDATA% was redirected).
+_SESSION_DATA = tempfile.mkdtemp(prefix="jarvis-test-data-")
+os.environ["JARVIS_DATA_DIR"] = _SESSION_DATA
+os.environ["APPDATA"] = _SESSION_DATA
+
 
 class FakeLLM:
     """Scripted LLM. Fails the test loudly on any call it was not given an answer for."""
@@ -36,6 +43,7 @@ class IsolatedCase(unittest.TestCase):
         self.tmp = Path(self._tmp.name)
         env = {k: v for k, v in os.environ.items() if not k.upper().startswith("JARVIS_") and k.upper() != "GROQ_API_KEY"}
         env["APPDATA"] = str(self.tmp / "appdata")
+        env["JARVIS_DATA_DIR"] = str(self.tmp / "appdata" / "JARVIS")  # private per test, never the real one
         self._env = mock.patch.dict(os.environ, env, clear=True)
         self._env.start()
 

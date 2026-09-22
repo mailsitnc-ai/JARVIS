@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from core import oslayer
+import tests.helpers  # noqa: F401  - redirects JARVIS_DATA_DIR away from the real user data
 
 
 class PlatformFlagTests(unittest.TestCase):
