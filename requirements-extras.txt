@@ -24,3 +24,6 @@ mediapipe==0.10.21 ; sys_platform == "darwin" and platform_machine == "arm64"
 # once on first use, then loads offline. Needs Microphone permission for JARVIS.app.
 faster-whisper>=1.1
 sounddevice>=0.4
+
+# Document Q&A ("summarise it", "quiz me on it"): PDF text extraction. Word/RTF/Pages use macOS textutil.
+pypdf>=4

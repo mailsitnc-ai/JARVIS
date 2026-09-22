@@ -297,6 +297,169 @@ def scroll_pixels(pixels: int, up: bool) -> None:
         scroll(100, up)
 
 
+# ---- clipboard ---------------------------------------------------------------------------------
+
+def clipboard_get() -> str:
+    try:
+        if IS_MAC:
+            return subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=5).stdout
+        if IS_WINDOWS:
+            return subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+                                  capture_output=True, text=True, timeout=10,
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+        return subprocess.run(["xclip", "-selection", "clipboard", "-o"], capture_output=True, text=True,
+                              timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def clipboard_set(text: str) -> bool:
+    try:
+        if IS_MAC:
+            subprocess.run(["pbcopy"], input=text, text=True, timeout=5, check=True)
+        elif IS_WINDOWS:
+            subprocess.run(["powershell", "-NoProfile", "-Command", "$input | Set-Clipboard"], input=text,
+                           text=True, timeout=10, check=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        else:
+            subprocess.run(["xclip", "-selection", "clipboard"], input=text, text=True, timeout=5, check=True)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+# ---- file search ------------------------------------------------------------------------------
+
+_SKIP_DIRS = {"Library", ".Trash", "node_modules", ".git", "__pycache__", "AppData", ".cache", "venv", ".venv",
+              "site-packages", "chrome-debug", "chrome_user_data"}
+
+
+def find_files(names=(), content=(), exts=(), days: int | None = None, limit: int = 10) -> list[Path]:
+    """Files in your home folder matching ALL of: name words, content words (macOS Spotlight indexes
+    text inside documents), extensions and 'modified in the last N days'. Newest first."""
+    names = [n for n in names if n]
+    content = [c for c in content if c]
+    exts = [e.lower().lstrip(".") for e in exts if e]
+    home = Path.home()
+    found: list[Path] = []
+    if IS_MAC and shutil.which("mdfind"):
+        def esc(t):
+            return str(t).replace("\\", "").replace('"', "")
+        clauses = [f'kMDItemFSName == "*{esc(n)}*"cd' for n in names]
+        clauses += [f'kMDItemTextContent == "*{esc(c)}*"cd' for c in content]
+        if exts:
+            clauses.append("(" + " || ".join(f'kMDItemFSName == "*.{esc(e)}"c' for e in exts) + ")")
+        if days:
+            clauses.append(f"kMDItemFSContentChangeDate >= $time.today(-{int(days)})")
+        if not clauses:
+            return []
+        try:
+            out = subprocess.run(["mdfind", "-onlyin", str(home), " && ".join(clauses)], capture_output=True,
+                                 text=True, timeout=20).stdout
+            found = [Path(line) for line in out.splitlines() if line.strip()]
+        except (OSError, subprocess.TimeoutExpired):
+            found = []
+        found = [p for p in found if p.is_file() and not (set(p.relative_to(home).parts[:-1]) & _SKIP_DIRS)
+                 and not any(part.startswith(".") for part in p.relative_to(home).parts)]
+    else:
+        cutoff = time.time() - days * 86400 if days else 0
+        for base in ("Desktop", "Documents", "Downloads", "Pictures", "OneDrive"):
+            root = home / base
+            if not root.is_dir():
+                continue
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
+                for fn in filenames:
+                    low = fn.lower()
+                    if names and not all(n.lower() in low for n in names):
+                        continue
+                    if exts and low.rsplit(".", 1)[-1] not in exts:
+                        continue
+                    p = Path(dirpath) / fn
+                    try:
+                        if cutoff and p.stat().st_mtime < cutoff:
+                            continue
+                    except OSError:
+                        continue
+                    found.append(p)
+                if len(found) > 500:
+                    break
+    try:
+        found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        pass
+    return found[:limit]
+
+
+def reveal(path) -> None:
+    """Show a file selected in Finder / Explorer."""
+    try:
+        if IS_MAC:
+            _popen(["open", "-R", str(path)])
+        elif IS_WINDOWS:
+            _popen(["explorer", "/select,", str(path)])
+        else:
+            _popen(["xdg-open", str(Path(path).parent)])
+    except OSError:
+        pass
+
+
+# ---- processes (performance doctor) ------------------------------------------------------------
+
+def top_apps(limit: int = 6) -> list[dict]:
+    """Running apps grouped by name (Chrome's dozens of helpers count as 'Google Chrome'), with total
+    CPU % and memory MB, heaviest first."""
+    rows = []
+    try:
+        if IS_WINDOWS:
+            import csv
+            import io
+            out = subprocess.run(["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=15,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+            for r in csv.reader(io.StringIO(out)):
+                if len(r) >= 5:
+                    mem = float(re.sub(r"[^\d]", "", r[4]) or 0) / 1024
+                    rows.append((r[0].rsplit(".", 1)[0], 0.0, mem))
+        else:
+            out = subprocess.run(["ps", "-Ao", "pcpu=,rss=,comm="], capture_output=True, text=True, timeout=10).stdout
+            for line in out.splitlines():
+                parts = line.split(None, 2)
+                if len(parts) < 3:
+                    continue
+                cpu, rss, comm = float(parts[0]), float(parts[1]) / 1024, parts[2]
+                m = re.search(r"/([^/]+)\.app/", comm)
+                name = m.group(1) if m else Path(comm).name
+                name = re.sub(r"\s+Helper.*$", "", name)
+                rows.append((name, cpu, rss))
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return []
+    apps: dict = {}
+    for name, cpu, mem in rows:
+        a = apps.setdefault(name, {"name": name, "cpu": 0.0, "mem_mb": 0.0, "procs": 0})
+        a["cpu"] += cpu
+        a["mem_mb"] += mem
+        a["procs"] += 1
+    return sorted(apps.values(), key=lambda a: (a["cpu"], a["mem_mb"]), reverse=True)[:limit] if rows else []
+
+
+def quit_app(name: str) -> tuple[bool, str]:
+    """Ask an app to quit normally (it can still prompt you to save)."""
+    try:
+        if IS_MAC:
+            safe = name.replace('"', "")
+            r = subprocess.run(["osascript", "-e", f'tell application "{safe}" to quit'], capture_output=True,
+                               text=True, timeout=20)
+            return r.returncode == 0, (r.stderr or "").strip()
+        if IS_WINDOWS:
+            r = subprocess.run(["taskkill", "/IM", f"{name}.exe"], capture_output=True, text=True, timeout=20,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return r.returncode == 0, (r.stderr or "").strip()
+        r = subprocess.run(["pkill", "-f", name], capture_output=True, text=True, timeout=10)
+        return r.returncode == 0, ""
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+
+
 # ---- battery -----------------------------------------------------------------------------------
 
 def battery() -> tuple[int, bool] | None:

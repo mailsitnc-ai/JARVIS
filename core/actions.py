@@ -729,6 +729,77 @@ class ActionBroker:
 
         return self._gated(req, do, "[file contents unavailable during verification]")
 
+    # ---- clipboard, file search, document text, apps (the "tools" skills) ----------------------
+
+    def read_clipboard(self) -> str:
+        req = ActionRequest("read_files", "Read your clipboard", details="clipboard")
+        return self._gated(req, lambda: _osl().clipboard_get(), "[clipboard unavailable during verification]")
+
+    def write_clipboard(self, text: str) -> str:
+        req = ActionRequest("write_files", "Put the result on your clipboard", details=str(text)[:200])
+
+        def do():
+            return "Copied to your clipboard." if _osl().clipboard_set(str(text)) else "Couldn't set the clipboard."
+        return self._gated(req, do, "Would copy the result to your clipboard.")
+
+    def find_files(self, names=(), content=(), exts=(), days=None, limit: int = 10) -> list:
+        what = " ".join([*names, *content, *exts]) or "files"
+        req = ActionRequest("read_files", f"Search your files for {what}", details=f"days={days}")
+        return self._gated(req, lambda: _osl().find_files(names, content, exts, days, limit), [])
+
+    def read_document(self, path: str, max_chars: int = 60000) -> str:
+        """Text of a document: PDF (pypdf), Word/RTF/Pages (macOS textutil), or any text file."""
+        target = Path(path).expanduser()
+        req = ActionRequest("read_files", f"Read {target.name}", details=str(target))
+
+        def do():
+            if not target.is_file():
+                return f"There's no file at {target}."
+            ext = target.suffix.lower()
+            if ext == ".pdf":
+                try:
+                    from pypdf import PdfReader
+                except ImportError:
+                    self.install_package("pypdf")
+                    _make_installed_packages_importable()
+                    from pypdf import PdfReader
+                reader = PdfReader(str(target))
+                parts, total = [], 0
+                for i, page in enumerate(reader.pages):
+                    text = page.extract_text() or ""
+                    parts.append(f"[page {i + 1}]\n{text}")
+                    total += len(text)
+                    if total > max_chars:
+                        break
+                return "\n".join(parts)[:max_chars]
+            if ext in (".docx", ".doc", ".rtf", ".rtfd", ".odt", ".pages", ".html", ".htm") and \
+                    _osl().IS_MAC:
+                out = subprocess.run(["textutil", "-convert", "txt", "-stdout", str(target)],
+                                     capture_output=True, text=True, timeout=60)
+                return out.stdout[:max_chars] or f"I couldn't read text from {target.name}."
+            return target.read_text(encoding="utf-8", errors="replace")[:max_chars]
+
+        return self._gated(req, do, "[document contents unavailable during verification]")
+
+    def reveal_file(self, path: str) -> str:
+        target = Path(path).expanduser()
+        req = ActionRequest("open", f"Show {target.name} in Finder", details=str(target))
+
+        def do():
+            _osl().reveal(target)
+            self.remember_focus("file", target)
+            return f"Showing {target.name}."
+        return self._gated(req, do, f"Would show {target.name}.")
+
+    def quit_app(self, name: str) -> str:
+        """Ask an app to quit (it can still offer to save your work). Gated by 'run_command'."""
+        req = ActionRequest("run_command", f"Quit {name}", details=name)
+
+        def do():
+            ok, err = _osl().quit_app(name)
+            return f"Asked {name} to quit." if ok else f"Couldn't quit {name}{': ' + err if err else ''}."
+        return self._gated(req, do, f"Would quit {name}.")
+
     def list_dir(self, path: str = ".") -> str:
         target = Path(path).expanduser()
         req = ActionRequest("read_files", f"List {target}", details=str(target))

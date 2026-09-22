@@ -72,7 +72,7 @@ class Segmenter:
     """Energy-based voice-activity detection: feed 30 ms float32 frames, get whole utterances back.
     The noise floor adapts, so it works in a quiet room and near a fan."""
 
-    def __init__(self, start_ratio=3.0, min_level=0.006, end_silence=0.8, max_len=15.0, min_len=0.35,
+    def __init__(self, start_ratio=3.0, min_level=0.008, end_silence=0.8, max_len=12.0, min_len=0.35,
                  preroll=0.3):
         self.start_ratio, self.min_level = start_ratio, min_level
         self.end_frames = int(end_silence * RATE / BLOCK)
@@ -162,6 +162,9 @@ class Listener:
     """Mic -> utterances -> local transcription -> wake word -> on_command(text)."""
 
     FOLLOW_UP = 7.0     # s after a bare "Jarvis" during which the next utterance is the command
+    GATE_S = 2.5        # only the first seconds are checked for the wake word; the rest is transcribed
+                        # only if they were addressed to JARVIS (a 14 s chat costs ~18 CPU-s to transcribe
+                        # fully, ~2 CPU-s to gate - background talk/TV no longer pins the CPU)
 
     def __init__(self, on_command, on_state=None, speaker: Speaker | None = None, vocab=None,
                  model: str = "base.en", wake_words=()):
@@ -191,22 +194,28 @@ class Listener:
     def _load(self):
         from faster_whisper import WhisperModel
         try:   # already downloaded -> no network at all (works offline, nothing phones home)
-            self._model = WhisperModel(self.model_name, device="cpu", compute_type="int8", cpu_threads=4,
+            self._model = WhisperModel(self.model_name, device="cpu", compute_type="int8", cpu_threads=2,
                                        local_files_only=True)
         except Exception:   # first run: fetch the model once (~140 MB for base.en)
             self.on_state("downloading")
-            self._model = WhisperModel(self.model_name, device="cpu", compute_type="int8", cpu_threads=4)
+            self._model = WhisperModel(self.model_name, device="cpu", compute_type="int8", cpu_threads=2)
 
     def _prompt(self) -> str:
         names = [n for n in self.vocab() if n][:40]
         return "Jarvis. " + (("Names: " + ", ".join(names) + ". ") if names else "") + \
             "WhatsApp, Google Docs, Gmail, Chrome."
 
-    def transcribe(self, audio) -> str:
+    def transcribe(self, audio, prompt: bool = True) -> str:
         segments, _ = self._model.transcribe(audio, beam_size=1, language="en", vad_filter=False,
-                                             initial_prompt=self._prompt(), hotwords="Jarvis",
-                                             condition_on_previous_text=False)
+                                             initial_prompt=self._prompt() if prompt else None,
+                                             condition_on_previous_text=False, without_timestamps=True)
         return " ".join(s.text for s in segments).strip()
+
+    def _gate(self, audio) -> bool:
+        """Cheap check of the opening words for the wake word (no vocabulary prompt here, so noise isn't
+        nudged into sounding like 'Jarvis')."""
+        head = audio[:int(self.GATE_S * RATE)]
+        return parse_wake(self.transcribe(head, prompt=False), self.wake_words)[0]
 
     def _callback(self, indata, frames, time_info, status):
         try:
@@ -254,6 +263,9 @@ class Listener:
 
     def _handle(self, audio):
         try:
+            awake = time.time() < self._awake_until
+            if not awake and len(audio) > (self.GATE_S + 0.5) * RATE and not self._gate(audio):
+                return                                  # not for us: discarded, never logged
             text = self.transcribe(audio)
         except Exception as exc:
             self.on_state("error", f"transcription failed: {exc}")

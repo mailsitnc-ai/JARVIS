@@ -80,7 +80,8 @@ class ArcReactor(tk.Canvas):
                     self._draw_fallback()
             except tk.TclError:
                 return
-        self.after(66 if showing else 400, self._tick)
+        # 15 fps while working/speaking, 10 fps idle (the idle spin is slow anyway), paused when hidden
+        self.after((66 if self.state_name in ("busy", "speaking") else 100) if showing else 400, self._tick)
         if showing and self._photos:
             self._index = (self._index + STATES[self.state_name]["step"]) % len(self._photos)
 

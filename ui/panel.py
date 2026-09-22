@@ -273,6 +273,12 @@ class JarvisPanel:
         except Exception as exc:
             self.events.put(("event", f"Voice unavailable: {exc}"))
         try:
+            from core import oslayer, reminders
+            reminders.start_loop(emit=lambda text: self.events.put(("event", f"⏰ {text}")), speak=self._say,
+                                 notify=lambda text: oslayer.notify(text, "JARVIS"))
+        except Exception as exc:
+            self.events.put(("event", f"Reminders unavailable: {exc}"))
+        try:
             from core import sentinel
             sentinel.start(self.settings, emit=lambda text: self.events.put(("event", f"⚠ {text}")),
                            speak=self._say)
