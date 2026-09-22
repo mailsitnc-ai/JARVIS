@@ -29,8 +29,10 @@ import collections
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -78,17 +80,30 @@ class HandInterpreter:
       ("identify",) ("screenshot",) ("stop",)
     Screen coordinates come from `screen` (w, h)."""
 
-    # the part of the camera view mapped onto the whole screen (so you needn't reach the frame edges)
-    BOX = (0.2, 0.18, 0.8, 0.68)
+    # The part of the camera view mapped onto the whole screen at speed 1.0. A bigger box = a slower,
+    # more precise pointer (your hand travels further per screen). Tuned from a real session where a
+    # 0.6-wide box felt "too responsive". `speed` (config gestures.pointer_speed) scales it.
+    BOX_W, BOX_H, BOX_CX, BOX_CY = 0.76, 0.62, 0.5, 0.45
     PINCH_ON, PINCH_OFF = 0.26, 0.40       # thumb-tip distance / palm size, with hysteresis
+    PINCH_FRAMES = 2                       # a pinch must hold this many frames (passing shapes don't click)
+    SETTLE = 0.25                          # s after the hand appears before any click can happen
     CLICK_FREEZE = 0.22                    # s the pointer holds still after a pinch (clean clicks)
     DOUBLE_CLICK = 0.45                    # s between pinches that counts as a double-click
-    HOLD = {"point": 0.1, "two": 0.15, "three": 0.6, "four": 0.6, "palm": 0.8}
+    DEADZONE = 3.0                         # px: smaller pointer changes are ignored (no micro-jitter)
+    HOLD = {"point": 0.1, "two": 0.15, "three": 1.0, "four": 0.6, "palm": 0.8}
     COOLDOWN = 3.0
 
-    def __init__(self, screen=(1440, 900)):
+    def __init__(self, screen=(1440, 900), speed: float = 1.0):
         self.sw, self.sh = screen
-        self.fx, self.fy = OneEuro(), OneEuro()
+        speed = min(max(float(speed or 1.0), 0.3), 3.0)
+        w, h = min(0.98, self.BOX_W / speed), min(0.98, self.BOX_H / speed)
+        cx = min(max(self.BOX_CX, w / 2), 1 - w / 2)
+        cy = min(max(self.BOX_CY, h / 2), 1 - h / 2)
+        self.BOX = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+        # calmer than the defaults: more smoothing while nearly still, still quick on big moves
+        self.fx, self.fy = OneEuro(0.7, 2.5), OneEuro(0.7, 2.5)
+        self._cand, self._cand_frames = None, 0
+        self.hand_since = None
         self.votes = collections.deque(maxlen=5)
         self.pose, self.pose_since = "none", 0.0
         self.pinch = None                  # None | "left" | "right"
@@ -117,7 +132,9 @@ class HandInterpreter:
         palm = d(0, 9) or 1e-6
         # a finger curled into a fist also ends near the thumb - only count it if it isn't curled
         left_ok = d(8, 0) > d(6, 0) * 0.9
-        right_ok = d(12, 0) > d(10, 0) * 0.9
+        # right-click = fold the index and touch thumb to middle; with the index still up (two-finger
+        # scroll) a thumb drifting near the middle finger must NOT right-click
+        right_ok = d(12, 0) > d(10, 0) * 0.9 and d(8, 0) <= d(6, 0) * 1.1
         rl, rr = d(4, 8) / palm, d(4, 12) / palm
         if self.pinch == "left":
             return "left" if rl < self.PINCH_OFF else None
@@ -129,6 +146,21 @@ class HandInterpreter:
         if left_ok and rl < self.PINCH_ON and rl <= rr:
             return "left"
         return None
+
+    def _debounced_pinch(self, raw, t):
+        """An engaged pinch stays until released. A NEW one must hold PINCH_FRAMES frames, the hand must
+        have settled, and a left click must come from pointing - so opening a fist, or a thumb drifting
+        while you scroll, can't click."""
+        if self.pinch:
+            return raw if raw == self.pinch else None
+        if raw != self._cand:
+            self._cand, self._cand_frames = raw, 0
+        self._cand_frames += bool(raw)
+        if not raw or self._cand_frames < self.PINCH_FRAMES or t - self.hand_since < self.SETTLE:
+            return None
+        if raw == "left" and self.pose not in ("point", "pinch"):
+            return None
+        return raw
 
     def classify(self, p) -> str:
         thumb, i, m, r, k = self.fingers(p)
@@ -160,13 +192,16 @@ class HandInterpreter:
             if self.pinch:
                 acts.append(("up", self.pinch))
             self.pinch, self.scroll_anchor, self.label = None, None, ""
+            self._cand, self._cand_frames, self.hand_since = None, 0, None
             self.votes.clear()
             self.pose = "none"
             self.fx.reset()
             self.fy.reset()
             return acts
 
-        pinch = self._pinch_state(p)
+        if self.hand_since is None:
+            self.hand_since = t
+        pinch = self._debounced_pinch(self._pinch_state(p), t)
         self.votes.append(self.classify(p))
         top, n = collections.Counter(self.votes).most_common(1)[0]
         pose = "pinch" if pinch else (top if n * 2 > len(self.votes) else self.pose)
@@ -196,7 +231,7 @@ class HandInterpreter:
 
         if pointer:
             frozen = self.pinch and t - self.pinch_since < self.CLICK_FREEZE
-            if not frozen and (self.cursor is None or math.dist(self.cursor, (sx, sy)) >= 1.5):
+            if not frozen and (self.cursor is None or math.dist(self.cursor, (sx, sy)) >= self.DEADZONE):
                 acts.append(("drag" if self.pinch == "left" else "move", sx, sy))
                 self.cursor = (sx, sy)
             self.label = {"left": "click / drag", "right": "right-click"}.get(self.pinch, "pointer")
@@ -340,26 +375,46 @@ class GestureController:
         threading.Thread(target=fn, args=args, daemon=True).start()
 
     def _identify(self, frame_copy):
+        """Name what you're holding up. PRIVACY: the photo never goes to your Pictures or anywhere
+        permanent - it's written to a private (owner-only) temp folder, sent once to the vision model
+        (Google Gemini) and deleted as soon as the answer comes back; the whole folder is wiped when
+        hand control stops. Camera frames otherwise never leave memory, and the hand tracking itself
+        runs on this computer."""
+        path = None
         try:
-            import time as _t
-            from pathlib import Path
-
             import cv2
             from core.vision import available, describe_image
-            target = Path.home() / "Pictures" / f"JARVIS-cam-{_t.strftime('%Y%m%d-%H%M%S')}.png"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(target), frame_copy)
             if not available():
-                self.emit("gesture", "Captured it, but I need a vision key to name it (jarvis setkey gemini).")
+                self.emit("gesture", "I need a vision key to name things (jarvis setkey gemini).")
                 return
-            desc = describe_image(str(target), "What object is the person holding up to the camera? "
-                                               "Answer in a short phrase.")
+            fd, path = tempfile.mkstemp(suffix=".jpg", dir=self._private_dir())
+            os.close(fd)
+            cv2.imwrite(path, frame_copy, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            desc = describe_image(path, "What object is the person holding up to the camera? "
+                                        "Answer in a short phrase.")
             if desc and not desc.startswith("("):
-                self.emit("gesture", f"I see: {desc}")
+                self.emit("gesture", f"I see: {desc}  (photo sent to Gemini once, not saved)")
             else:
-                self.emit("gesture", "I captured it but couldn't identify it (try again / better light).")
+                self.emit("gesture", "I couldn't identify it (try again / better light). Photo not saved.")
         except Exception as exc:
             self.emit("gesture", f"Identify failed: {exc}")
+        finally:
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+    def _private_dir(self):
+        if getattr(self, "_tmpdir", None) is None:
+            self._tmpdir = tempfile.mkdtemp(prefix="jarvis-hand-")   # mode 0700: only you can read it
+        return self._tmpdir
+
+    def _wipe_private(self):
+        d = getattr(self, "_tmpdir", None)
+        if d:
+            shutil.rmtree(d, ignore_errors=True)
+            self._tmpdir = None
 
     def _perform(self, act, frame):
         from core import oslayer
@@ -421,7 +476,15 @@ class GestureController:
             return False         # window died - keep going headless
         return True
 
+    @staticmethod
+    def _sweep_stale():
+        """Remove private folders left by a crashed earlier session."""
+        import glob
+        for d in glob.glob(os.path.join(tempfile.gettempdir(), "jarvis-hand-*")):
+            shutil.rmtree(d, ignore_errors=True)
+
     def _run(self):
+        self._sweep_stale()
         cv2, cap = self._open_camera()
         if cap is None:
             return
@@ -448,8 +511,9 @@ class GestureController:
                 cv2.waitKey(1)
             except Exception:
                 pass
+            self._wipe_private()   # nothing from the camera outlives the session
             diag.line("stopped")
-            self.emit("gesture", "Hand control stopped.")
+            self.emit("gesture", "Hand control stopped - nothing from the camera was kept.")
 
     def _run_landmarks(self, cv2, cap, gui, tracker, diag):
         from core import oslayer
@@ -462,7 +526,13 @@ class GestureController:
         self.emit("gesture", "Hand control on - point to move the pointer, pinch thumb+index to click (hold to "
                              "drag), thumb+middle = right-click, two fingers = scroll, 3 = identify, "
                              "4 = screenshot, open palm = stop.")
-        hand = HandInterpreter(oslayer.screen_size())
+        try:
+            from core.config import load_settings
+            speed = float(load_settings().get("gestures.pointer_speed", 1.0) or 1.0)
+        except Exception:
+            speed = 1.0
+        hand = HandInterpreter(oslayer.screen_size(), speed)
+        diag.line(f"pointer_speed={speed} box={tuple(round(v, 2) for v in hand.BOX)}")
         while not self._stop.is_set():
             frame = self._read(cap, cv2)
             if frame is None:
@@ -485,7 +555,7 @@ class GestureController:
 
     def _draw_landmarks(self, frame, cv2, hand, pts):
         h, w = frame.shape[:2]
-        x0, y0, x1, y1 = HandInterpreter.BOX
+        x0, y0, x1, y1 = hand.BOX
         cv2.rectangle(frame, (int(x0 * w), int(y0 * h)), (int(x1 * w), int(y1 * h)), (90, 90, 90), 1)
         colour = {"pointer": (0, 255, 0), "click / drag": (0, 140, 255), "right-click": (255, 0, 200)}.get(
             hand.label, (255, 200, 0) if hand.label.startswith("scroll") else (0, 200, 200))
@@ -676,6 +746,10 @@ def _child_main(camera_index: int = 0) -> None:
             os._exit(0)   # the panel went away - stop
 
     ctl = GestureController(lambda cmd: out(run=cmd), lambda _kind, text: out(emit=text), camera_index)
+    import signal
+    # JARVIS stops us with SIGTERM: stop the loop cleanly so the camera is released and the private
+    # temp folder is wiped (the default SIGTERM would kill us before any cleanup ran).
+    signal.signal(signal.SIGTERM, lambda *_: ctl.stop())
     ctl._run()
     if ctl.error:
         out(error=ctl.error)

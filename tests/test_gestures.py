@@ -143,10 +143,35 @@ class HandInterpreterTests(unittest.TestCase):
         acts = self.feed(_hand("01000", thumb_to="index", dx=0.1), 20)
         self.assertIn("drag", self.kinds(acts))
 
-    def test_thumb_to_middle_is_a_right_click(self):
-        self.feed(_hand("01100"), 10)
-        acts = self.feed(_hand("01100", thumb_to="middle"), 3)
+    def test_thumb_to_middle_with_index_folded_is_a_right_click(self):
+        self.feed(_hand("00100"), 10)
+        acts = self.feed(_hand("00100", thumb_to="middle"), 3)
         self.assertIn(("down", "right", 1), acts)
+
+    # --- misfires seen in the user's real session log (2026-09-22 22:06) ---
+    def test_thumb_near_middle_while_scrolling_does_not_right_click(self):
+        self.feed(_hand("01100"), 10)
+        acts = self.feed(_hand("01100", thumb_to="middle"), 10)
+        self.assertNotIn("down", self.kinds(acts))
+
+    def test_opening_a_fist_through_a_pinch_shape_does_not_click(self):
+        self.feed(_hand("00000"), 10)
+        acts = self.feed(_hand("01000", thumb_to="index"), 3)
+        self.assertNotIn("down", self.kinds(acts))
+
+    def test_a_single_frame_pinch_is_ignored(self):
+        self.feed(_hand("01000"), 10)
+        acts = self.feed(_hand("01000", thumb_to="index"), 1) + self.feed(_hand("01000"), 3)
+        self.assertNotIn("down", self.kinds(acts))
+
+    def test_no_click_right_after_the_hand_appears(self):
+        acts = self.feed(_hand("01000", thumb_to="index"), 4)   # ~0.13s < settle time
+        self.assertNotIn("down", self.kinds(acts))
+
+    def test_pointer_speed_setting_scales_the_mapping(self):
+        from core.gestures import HandInterpreter
+        slow, fast = HandInterpreter((1000, 800), 0.7), HandInterpreter((1000, 800), 1.5)
+        self.assertGreater(slow.BOX[2] - slow.BOX[0], fast.BOX[2] - fast.BOX[0])
 
     def test_a_fist_never_clicks(self):
         acts = self.feed(_hand("00000", thumb_to="index"), 30)
