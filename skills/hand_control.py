@@ -1,8 +1,9 @@
 """Control JARVIS with hand gestures through the webcam ("watch my hands", "enable hand control").
 
-Starts the gesture engine (core/gestures.py) which watches the webcam and fires a mapped command on a
-stable finger count (1 = screenshot, 2 = time, 3 = read screen; open palm = stop). Privacy-gated on the
-'camera' capability, so it only runs from an explicit command you approve.
+Starts the gesture engine (core/gestures.py): point to move the mouse pointer, pinch thumb+index to click
+(twice = double-click, hold = drag), thumb+middle = right-click, two fingers = scroll, 3 = identify,
+4 = screenshot, open palm = stop. Privacy-gated on the 'camera' capability, so it only runs from an
+explicit command you approve.
 """
 import re
 
@@ -10,8 +11,8 @@ from core.actions import ActionBroker
 
 SKILL = {
     "name": "hand_control",
-    "description": "Control JARVIS with hand gestures via the webcam, e.g. 'watch my hands', 'enable "
-                   "hand control', 'stop watching my hands'.",
+    "description": "Control the mouse with your hand via the webcam (point to move, pinch to click, two "
+                   "fingers to scroll), e.g. 'watch my hands', 'enable hand control', 'stop watching my hands'.",
     "triggers": [
         r"\b(?:hand|gesture)\s+control\b",
         r"\bcontrol\b[^.\n]*\b(?:hand|hands|gesture|gestures)\b",
@@ -19,7 +20,7 @@ SKILL = {
         r"\b(?:enable|start|turn\s+on|use)\b[^.\n]*\bgestures?\b",
         r"\bstop\b[^.\n]*\b(?:hand|hands|gesture)\b",
     ],
-    "version": 1,
+    "version": 2,
     "origin": "builtin",
 }
 

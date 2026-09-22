@@ -1,24 +1,27 @@
-"""Control JARVIS - and your browser - with hand gestures through the webcam. OpenCV only (no MediaPipe,
-which won't run on this CPU).
+"""Control your Mac/PC with your hand through the webcam.
 
-It watches a webcam region, segments the hand by skin colour, and counts extended fingers (0-5) via
-convex-hull defects. Gestures split into two kinds:
+With MediaPipe hand landmarks (21 points per hand - `pip install mediapipe` + the hand_landmarker.task
+model), the hand works like a mouse:
 
-  * HOLD gestures act continuously the whole time you hold them - scrolling the window you're looking at
-    (real OS mouse-wheel events, so it drives your actual browser, not just JARVIS's Chrome).
-  * ONE-SHOT gestures fire once, then wait for a cooldown - identify what you're holding (vision), or a
-    screenshot.
+  point (index finger up)        move the pointer (smoothed; hand anywhere in view)
+  pinch thumb + index            click  (pinch twice quickly = double-click; hold the pinch and move = drag)
+  pinch thumb + middle finger    right-click
+  two fingers (index + middle)   scroll like a joystick: move the hand up/down from where you started -
+                                 further = faster
+  three fingers (hold)           identify what you're holding (vision)
+  four fingers (hold)            screenshot
+  open palm (hold)               stop hand control          fist = rest (nothing happens)
 
-  1 finger  = scroll down (hold)      3 fingers = identify what I'm holding (vision)
-  2 fingers = scroll up   (hold)      4 fingers = take a screenshot
-  open palm (5) = stop                fist (0)  = rest
+Without MediaPipe it falls back to skin-colour finger counting inside a box: 1 finger = scroll down,
+2 = scroll up (hold), 3 = identify, 4 = screenshot, open palm = stop.
 
 Privacy: only runs from an explicit command you approve (broker gates it on the SENSITIVE 'camera'
 capability), never a background task. The preview window (or an open palm) stops it.
 
 On macOS the camera loop runs in its own process (`python -m core.gestures`): OpenCV's preview window
 must own the main thread there, which inside JARVIS belongs to the Tk panel. Events come back to the
-panel as JSON lines on stdout. Windows keeps the in-process thread.
+panel as JSON lines on stdout. Windows keeps the in-process thread. Each run writes a short diagnostics
+log (fps, detection rate, poses, actions) to <data dir>/hand_control.log for tuning.
 """
 from __future__ import annotations
 
@@ -36,18 +39,281 @@ _ACTIVE = None
 _LOCK = threading.Lock()
 
 
+# ---- pointer smoothing --------------------------------------------------------------------------
+
+class OneEuro:
+    """One-Euro filter (Casiez et al.): heavy smoothing when the hand is still (kills jitter), light
+    smoothing when it moves fast (no lag). Values are normalised 0..1 camera coordinates."""
+
+    def __init__(self, min_cutoff: float = 1.2, beta: float = 6.0, d_cutoff: float = 1.0):
+        self.min_cutoff, self.beta, self.d_cutoff = min_cutoff, beta, d_cutoff
+        self._x = self._dx = self._t = None
+
+    @staticmethod
+    def _alpha(cutoff: float, dt: float) -> float:
+        tau = 1.0 / (2 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+    def reset(self):
+        self._x = self._dx = self._t = None
+
+    def __call__(self, x: float, t: float) -> float:
+        if self._t is None:
+            self._x, self._dx, self._t = x, 0.0, t
+            return x
+        dt = max(1e-3, t - self._t)
+        dx = (x - self._x) / dt
+        self._dx += self._alpha(self.d_cutoff, dt) * (dx - self._dx)
+        cutoff = self.min_cutoff + self.beta * abs(self._dx)
+        self._x += self._alpha(cutoff, dt) * (x - self._x)
+        self._t = t
+        return self._x
+
+
+# ---- landmarks -> actions (pure logic, no camera/OS, unit-tested) --------------------------------
+
+class HandInterpreter:
+    """Turns a stream of 21-point hand landmarks (normalised, mirrored like a mirror) into mouse actions:
+      ("move", x, y) ("down", button, clicks) ("up", button) ("drag", x, y) ("scroll", px, up)
+      ("identify",) ("screenshot",) ("stop",)
+    Screen coordinates come from `screen` (w, h)."""
+
+    # the part of the camera view mapped onto the whole screen (so you needn't reach the frame edges)
+    BOX = (0.2, 0.18, 0.8, 0.68)
+    PINCH_ON, PINCH_OFF = 0.26, 0.40       # thumb-tip distance / palm size, with hysteresis
+    CLICK_FREEZE = 0.22                    # s the pointer holds still after a pinch (clean clicks)
+    DOUBLE_CLICK = 0.45                    # s between pinches that counts as a double-click
+    HOLD = {"point": 0.1, "two": 0.15, "three": 0.6, "four": 0.6, "palm": 0.8}
+    COOLDOWN = 3.0
+
+    def __init__(self, screen=(1440, 900)):
+        self.sw, self.sh = screen
+        self.fx, self.fy = OneEuro(), OneEuro()
+        self.votes = collections.deque(maxlen=5)
+        self.pose, self.pose_since = "none", 0.0
+        self.pinch = None                  # None | "left" | "right"
+        self.pinch_since = 0.0
+        self.cursor = None                 # last emitted screen position
+        self.last_click = (0.0, None)
+        self.scroll_anchor = None
+        self.next_fire = 0.0
+        self.label = ""
+
+    # -- geometry --
+    @staticmethod
+    def _d(p, a, b):
+        return math.dist(p[a], p[b])
+
+    def fingers(self, p):
+        """(thumb, index, middle, ring, pinky) extended?"""
+        d = lambda a, b: self._d(p, a, b)  # noqa: E731
+        ext = [d(tip, 0) > d(pip, 0) * 1.1 for tip, pip in ((8, 6), (12, 10), (16, 14), (20, 18))]
+        palm = d(0, 9) or 1e-6
+        thumb = d(4, 5) / palm > 0.55 and d(4, 0) > d(3, 0)
+        return (thumb, *ext)
+
+    def _pinch_state(self, p):
+        d = lambda a, b: self._d(p, a, b)  # noqa: E731
+        palm = d(0, 9) or 1e-6
+        # a finger curled into a fist also ends near the thumb - only count it if it isn't curled
+        left_ok = d(8, 0) > d(6, 0) * 0.9
+        right_ok = d(12, 0) > d(10, 0) * 0.9
+        rl, rr = d(4, 8) / palm, d(4, 12) / palm
+        if self.pinch == "left":
+            return "left" if rl < self.PINCH_OFF else None
+        if self.pinch == "right":
+            return "right" if rr < self.PINCH_OFF else None
+        # index and middle tips sit close together, so pick the fingertip the thumb is clearly nearest
+        if right_ok and rr < self.PINCH_ON and rr < rl * 0.8:
+            return "right"
+        if left_ok and rl < self.PINCH_ON and rl <= rr:
+            return "left"
+        return None
+
+    def classify(self, p) -> str:
+        thumb, i, m, r, k = self.fingers(p)
+        if i and not (m or r or k):
+            return "point"
+        if i and m and not (r or k):
+            return "two"
+        if i and m and r and not k:
+            return "three"
+        if i and m and r and k:
+            return "palm" if thumb else "four"
+        if not (i or m or r or k):
+            return "fist"
+        return "other"
+
+    def _to_screen(self, p, t):
+        x0, y0, x1, y1 = self.BOX
+        # the index knuckle: steady while pinching (the fingertip itself moves when you pinch)
+        nx = self.fx(p[5][0], t)
+        ny = self.fy(p[5][1], t)
+        sx = min(max((nx - x0) / (x1 - x0), 0.0), 1.0) * (self.sw - 1)
+        sy = min(max((ny - y0) / (y1 - y0), 0.0), 1.0) * (self.sh - 1)
+        return sx, sy
+
+    # -- main step --
+    def update(self, p, t: float) -> list:
+        acts = []
+        if p is None:                      # hand lost: never leave a button stuck down
+            if self.pinch:
+                acts.append(("up", self.pinch))
+            self.pinch, self.scroll_anchor, self.label = None, None, ""
+            self.votes.clear()
+            self.pose = "none"
+            self.fx.reset()
+            self.fy.reset()
+            return acts
+
+        pinch = self._pinch_state(p)
+        self.votes.append(self.classify(p))
+        top, n = collections.Counter(self.votes).most_common(1)[0]
+        pose = "pinch" if pinch else (top if n * 2 > len(self.votes) else self.pose)
+        if pose != self.pose:
+            self.pose, self.pose_since = pose, t
+            if pose != "two":
+                self.scroll_anchor = None
+        held = t - self.pose_since
+        pointer = pose in ("point", "pinch") and (pose == "pinch" or held >= self.HOLD["point"])
+        sx, sy = self._to_screen(p, t)
+
+        # pinch edges -> button down/up
+        if pinch != self.pinch:
+            if self.pinch:
+                acts.append(("up", self.pinch))
+            if pinch:
+                clicks = 1
+                last_t, last_pos = self.last_click
+                if pinch == "left" and t - last_t < self.DOUBLE_CLICK and last_pos and \
+                        math.dist(last_pos, (sx, sy)) < 40:
+                    clicks = 2
+                pos = self.cursor or (sx, sy)
+                acts.append(("down", pinch, clicks))
+                self.last_click = (t, pos) if pinch == "left" else self.last_click
+                self.pinch_since = t
+            self.pinch = pinch
+
+        if pointer:
+            frozen = self.pinch and t - self.pinch_since < self.CLICK_FREEZE
+            if not frozen and (self.cursor is None or math.dist(self.cursor, (sx, sy)) >= 1.5):
+                acts.append(("drag" if self.pinch == "left" else "move", sx, sy))
+                self.cursor = (sx, sy)
+            self.label = {"left": "click / drag", "right": "right-click"}.get(self.pinch, "pointer")
+        elif pose == "two" and held >= self.HOLD["two"]:
+            y = p[5][1]
+            if self.scroll_anchor is None:
+                self.scroll_anchor = y
+            off = y - self.scroll_anchor
+            if abs(off) > 0.03:
+                speed = min(90.0, (abs(off) - 0.03) * 900)
+                acts.append(("scroll", int(max(4, speed)), off < 0))   # hand up = scroll up
+                self.label = "scroll up" if off < 0 else "scroll down"
+            else:
+                self.label = "scroll (move hand up/down)"
+        elif pose in ("three", "four", "palm") and held >= self.HOLD[pose] and t >= self.next_fire:
+            acts.append({"three": ("identify",), "four": ("screenshot",), "palm": ("stop",)}[pose])
+            self.label = {"three": "identify", "four": "screenshot", "palm": "stop"}[pose]
+            self.next_fire = t + self.COOLDOWN
+        elif pose in ("fist", "other"):
+            self.label = "rest"
+        return acts
+
+
+class LandmarkTracker:
+    """MediaPipe's hand-landmark model. `create()` returns None when mediapipe or the model file is
+    missing (the caller then falls back to skin-colour counting)."""
+
+    def __init__(self, landmarker):
+        self._lm = landmarker
+        self._t0 = time.monotonic()
+
+    @classmethod
+    def create(cls):
+        try:
+            from mediapipe.tasks.python import BaseOptions, vision
+            from core.oslayer import user_data_dir
+        except Exception:
+            return None
+        model = user_data_dir() / "models" / "hand_landmarker.task"
+        if not model.is_file():
+            return None
+        try:
+            opts = vision.HandLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=str(model), delegate=BaseOptions.Delegate.CPU),
+                running_mode=vision.RunningMode.VIDEO, num_hands=1,
+                min_hand_detection_confidence=0.6, min_hand_presence_confidence=0.5,
+                min_tracking_confidence=0.5)
+            return cls(vision.HandLandmarker.create_from_options(opts))
+        except Exception:
+            return None
+
+    def detect(self, frame_bgr, cv2):
+        """21 normalised (x, y) points for the hand in view, or None."""
+        import mediapipe as mp
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = self._lm.detect_for_video(image, int((time.monotonic() - self._t0) * 1000))
+        if not result.hand_landmarks:
+            return None
+        return [(pt.x, pt.y) for pt in result.hand_landmarks[0]]
+
+
+def fingers_up(pts) -> int:
+    """Extended-finger count (0-5) from 21 landmarks."""
+    return sum(HandInterpreter().fingers(pts))
+
+
+class _Diag:
+    """Once-a-second summary lines in <data dir>/hand_control.log, so a run can be tuned afterwards."""
+
+    def __init__(self):
+        self.f = None
+        try:
+            from core.oslayer import user_data_dir
+            self.f = open(user_data_dir() / "hand_control.log", "w", encoding="utf-8")
+        except OSError:
+            pass
+        self._reset(time.time())
+
+    def _reset(self, t):
+        self.t0, self.frames, self.hands = t, 0, 0
+        self.poses = collections.Counter()
+        self.acts = collections.Counter()
+
+    def line(self, text):
+        if self.f:
+            self.f.write(time.strftime("%H:%M:%S ") + text + "\n")
+            self.f.flush()
+
+    def frame(self, t, hand, pose, acts):
+        self.frames += 1
+        self.hands += bool(hand)
+        self.poses[pose] += 1
+        for a in acts:
+            self.acts[a[0] if a[0] not in ("down", "up") else f"{a[0]}-{a[1]}"] += 1
+        if t - self.t0 >= 1.0:
+            dt = t - self.t0
+            self.line(f"fps={self.frames / dt:.1f} hand={100 * self.hands // max(1, self.frames)}% "
+                      f"poses={dict(self.poses)} actions={dict(self.acts)}")
+            self._reset(t)
+
+
+# ---- the camera loop --------------------------------------------------------------------------
+
 class GestureController:
     def __init__(self, runner, emit=None, camera_index=0, hold_scroll=0.2, hold_action=0.6, cooldown=3.0,
                  scroll_px=(18, 70), ramp_secs=1.5, vote_frames=7):
         self.runner = runner or (lambda cmd: None)
         self.emit = emit or (lambda *a: None)
         self.camera_index = camera_index
-        self.hold_scroll = hold_scroll            # seconds a scroll gesture must be steady before it starts
-        self.hold_action = hold_action            # ... and a one-shot (identify/screenshot/stop) before it fires
-        self.cooldown = cooldown                  # seconds between one-shot fires
-        self.scroll_px = scroll_px                # (start, max) pixels per frame while scrolling
-        self.ramp_secs = ramp_secs                # holding longer speeds the scroll up to max over this time
-        self.vote_frames = vote_frames            # majority vote over this many frames (smooths flicker)
+        # skin-colour fallback tuning
+        self.hold_scroll = hold_scroll
+        self.hold_action = hold_action
+        self.cooldown = cooldown
+        self.scroll_px = scroll_px
+        self.ramp_secs = ramp_secs
+        self.vote_frames = vote_frames
         self.error = None
         self._stop = threading.Event()
         self._thread = None
@@ -68,7 +334,7 @@ class GestureController:
         from core.oslayer import scroll_pixels
         lo, hi = self.scroll_px
         speed = lo + (hi - lo) * min(1.0, max(0.0, held) / self.ramp_secs)
-        scroll_pixels(int(speed), up)  # OS-level smooth wheel event: Windows mouse_event / macOS Quartz
+        scroll_pixels(int(speed), up)
 
     def _fire_async(self, fn, *args):
         threading.Thread(target=fn, args=args, daemon=True).start()
@@ -95,91 +361,86 @@ class GestureController:
         except Exception as exc:
             self.emit("gesture", f"Identify failed: {exc}")
 
+    def _perform(self, act, frame):
+        from core import oslayer
+        kind = act[0]
+        if kind in ("move", "drag"):
+            oslayer.mouse_event(kind, act[1], act[2])
+        elif kind in ("down", "up"):
+            pos = oslayer.mouse_position() or (0, 0)
+            oslayer.mouse_event(kind, pos[0], pos[1], button=act[1], clicks=act[2] if kind == "down" else 1)
+        elif kind == "scroll":
+            oslayer.scroll_pixels(act[1], act[2])
+        elif kind == "identify":
+            self._fire_async(self._identify, frame.copy())
+        elif kind == "screenshot":
+            self._fire_async(self.runner, "take a screenshot")
+        elif kind == "stop":
+            self._stop.set()
+
     # ---- loop ---------------------------------------------------------------------------------
 
-    def _run(self):
+    def _open_camera(self):
         try:
             import cv2
-            import numpy as np
         except ImportError:
             self.error = "the camera library (opencv) isn't available"
-            return
+            return None, None
         from core import oslayer
         if oslayer.request_camera_access() is False:
             self.error = "camera access is blocked (enable JARVIS/Python in System Settings > Privacy > Camera)"
-            return
+            return cv2, None
         cap = cv2.VideoCapture(self.camera_index, oslayer.camera_backend(cv2))
         if not cap or not cap.isOpened():
             self.error = "couldn't open the webcam (is it in use by another app?)"
             if cap:
                 cap.release()
-            return
-        # 640x480 is plenty for counting fingers and far cheaper than the webcam's native 1080p.
+            return cv2, None
+        # 640x480 is plenty for hand tracking and far cheaper than the webcam's native 1080p.
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        gui = True                     # opencv-python-headless has no HighGUI - detect and run without a window
+        return cv2, cap
+
+    def _read(self, cap, cv2):
+        ok, frame = cap.read()
+        if not ok:
+            return None
+        if frame.shape[1] > 720:   # the camera ignored the size request - shrink it ourselves
+            frame = cv2.resize(frame, (640, int(frame.shape[0] * 640 / frame.shape[1])))
+        return cv2.flip(frame, 1)  # mirror, so moving your hand right moves things right
+
+    def _show(self, cv2, frame, gui):
+        if not gui:
+            time.sleep(0.005)
+            return True
+        try:
+            cv2.imshow(_WINDOW, frame)
+            if (cv2.waitKey(1) & 0xFF) == ord("q") or cv2.getWindowProperty(_WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                return None      # closed -> stop
+        except cv2.error:
+            return False         # window died - keep going headless
+        return True
+
+    def _run(self):
+        cv2, cap = self._open_camera()
+        if cap is None:
+            return
+        gui = True
         try:
             cv2.namedWindow(_WINDOW, cv2.WINDOW_AUTOSIZE)
         except cv2.error:
             gui = False
             self.emit("gesture", "No preview window (headless OpenCV) - gestures still work; open palm to stop.")
-        self.emit("gesture", "Hand control on - 1 down, 2 up (hold to keep scrolling), 3 identify, "
-                             "4 screenshot; open palm = stop.")
-        counter = LandmarkCounter.create()   # None -> skin-colour fallback inside the green box
-        self.emit("gesture", "Tracking with MediaPipe hand landmarks (hand anywhere in view)." if counter
-                  else "Tracking by skin colour - keep your hand inside the box.")
-        recent = collections.deque(maxlen=self.vote_frames)
-        current, since, next_fire = 0, time.time(), 0.0
+        tracker = LandmarkTracker.create()
+        diag = _Diag()
         try:
-            while not self._stop.is_set():
-                ok, frame = cap.read()
-                if not ok:
-                    time.sleep(0.01)
-                    continue
-                if frame.shape[1] > 720:   # the camera ignored the size request - shrink it ourselves
-                    frame = cv2.resize(frame, (640, int(frame.shape[0] * 640 / frame.shape[1])))
-                frame = cv2.flip(frame, 1)
-                h, w = frame.shape[:2]
-                x0, y0, x1, y1 = int(w * 0.55), int(h * 0.10), w - 10, int(h * 0.65)
-                raw = counter.count(frame, cv2) if counter else count_fingers(frame[y0:y1, x0:x1], cv2, np)
-                recent.append(raw)
-                # Majority vote: one misread frame no longer resets the gesture (that made scrolling
-                # stutter and stop). The count must hold a majority of the recent frames.
-                top, votes = collections.Counter(recent).most_common(1)[0]
-                count = top if votes * 2 > len(recent) else current
-                now = time.time()
-                if count != current:
-                    current, since = count, now
-                held = now - since
-                label = None
-                if count >= 5 and held >= self.hold_action:
-                    self._stop.set()
-                elif count in (1, 2) and held >= self.hold_scroll:       # HOLD: scroll while shown
-                    label = "scroll down" if count == 1 else "scroll up"
-                    self._scroll(up=(count == 2), held=held - self.hold_scroll)
-                elif count == 3 and held >= self.hold_action and now >= next_fire:   # ONE-SHOT: identify
-                    label = "identify"
-                    self._fire_async(self._identify, frame.copy())
-                    next_fire = now + self.cooldown
-                elif count == 4 and held >= self.hold_action and now >= next_fire:   # ONE-SHOT: screenshot
-                    label = "screenshot"
-                    self._fire_async(self.runner, "take a screenshot")
-                    next_fire = now + self.cooldown
-                if gui:
-                    ready = count and held >= (self.hold_scroll if count in (1, 2) else self.hold_action)
-                    self._draw(frame, cv2, None if counter else (x0, y0, x1, y1), count, label, ready,
-                               counter.points if counter else None)
-                    try:
-                        cv2.imshow(_WINDOW, frame)
-                        if (cv2.waitKey(1) & 0xFF) == ord("q") or \
-                                cv2.getWindowProperty(_WINDOW, cv2.WND_PROP_VISIBLE) < 1:
-                            break
-                    except cv2.error:
-                        gui = False          # window died mid-run - keep going headless
-                else:
-                    time.sleep(0.01)
+            if tracker:
+                self._run_landmarks(cv2, cap, gui, tracker, diag)
+            else:
+                self._run_counts(cv2, cap, gui, diag)
         except Exception as exc:
             self.error = str(exc)
+            diag.line(f"error: {exc}")
         finally:
             cap.release()
             try:
@@ -187,80 +448,106 @@ class GestureController:
                 cv2.waitKey(1)
             except Exception:
                 pass
+            diag.line("stopped")
             self.emit("gesture", "Hand control stopped.")
 
-    def _draw(self, frame, cv2, box, count, label, ready, points=None):
-        colour = (0, 255, 0) if ready else (0, 180, 180)
-        if box:
-            x0, y0, x1, y1 = box
-            cv2.rectangle(frame, (x0, y0), (x1, y1), colour, 2)
-        for x, y in points or ():
-            cv2.circle(frame, (x, y), 4, colour, -1)
-        cv2.putText(frame, f"Fingers: {count}", (12, 34), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-        cv2.putText(frame, "1 down  2 up (hold)  3 identify  4 shot  |  open palm = stop",
-                    (12, frame.shape[0] - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
-        if label:
-            cv2.putText(frame, label, (12, 74), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2)
+    def _run_landmarks(self, cv2, cap, gui, tracker, diag):
+        from core import oslayer
+        allowed = oslayer.can_control_mouse(request=True)
+        diag.line(f"mode=landmarks screen={oslayer.screen_size()} mouse_allowed={allowed}")
+        if allowed is False:
+            self.emit("gesture", "I can see your hand, but macOS isn't letting me move the pointer yet: allow "
+                                 "JARVIS in System Settings > Privacy & Security > Accessibility, then restart "
+                                 "hand control.")
+        self.emit("gesture", "Hand control on - point to move the pointer, pinch thumb+index to click (hold to "
+                             "drag), thumb+middle = right-click, two fingers = scroll, 3 = identify, "
+                             "4 = screenshot, open palm = stop.")
+        hand = HandInterpreter(oslayer.screen_size())
+        while not self._stop.is_set():
+            frame = self._read(cap, cv2)
+            if frame is None:
+                time.sleep(0.01)
+                continue
+            now = time.time()
+            pts = tracker.detect(frame, cv2)
+            acts = hand.update(pts, now)
+            for act in acts:
+                self._perform(act, frame)
+            diag.frame(now, pts is not None, hand.pose, acts)
+            if gui:
+                self._draw_landmarks(frame, cv2, hand, pts)
+            shown = self._show(cv2, frame, gui)
+            if shown is None:
+                break
+            gui = gui and shown
+        for act in hand.update(None, time.time()):   # release anything still held
+            self._perform(act, None)
 
+    def _draw_landmarks(self, frame, cv2, hand, pts):
+        h, w = frame.shape[:2]
+        x0, y0, x1, y1 = HandInterpreter.BOX
+        cv2.rectangle(frame, (int(x0 * w), int(y0 * h)), (int(x1 * w), int(y1 * h)), (90, 90, 90), 1)
+        colour = {"pointer": (0, 255, 0), "click / drag": (0, 140, 255), "right-click": (255, 0, 200)}.get(
+            hand.label, (255, 200, 0) if hand.label.startswith("scroll") else (0, 200, 200))
+        for x, y in pts or ():
+            cv2.circle(frame, (int(x * w), int(y * h)), 3, colour, -1)
+        if pts:
+            cv2.circle(frame, (int(pts[5][0] * w), int(pts[5][1] * h)), 8, colour, 2)   # the pointer point
+        cv2.putText(frame, hand.label or ("no hand" if not pts else hand.pose), (12, 34),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, colour, 2)
+        cv2.putText(frame, "point=move  pinch=click/drag  thumb+middle=right  2=scroll  3=identify  "
+                           "4=shot  palm=stop", (8, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1)
 
-class LandmarkCounter:
-    """Finger counting with MediaPipe's hand-landmark model (21 points per hand) - far steadier than skin
-    colour, works anywhere in the frame and in any lighting. Needs `pip install mediapipe` and the model
-    at <data dir>/models/hand_landmarker.task; `create()` returns None when either is missing, and the
-    caller falls back to count_fingers()."""
-
-    _TIPS, _PIPS = (8, 12, 16, 20), (6, 10, 14, 18)
-
-    def __init__(self, landmarker):
-        self._lm = landmarker
-        self._t0 = time.monotonic()
-        self.points = None           # last hand's landmarks in pixels, for the preview overlay
-
-    @classmethod
-    def create(cls):
-        try:
-            from mediapipe.tasks.python import BaseOptions, vision
-            from core.oslayer import user_data_dir
-        except Exception:
-            return None
-        model = user_data_dir() / "models" / "hand_landmarker.task"
-        if not model.is_file():
-            return None
-        try:
-            opts = vision.HandLandmarkerOptions(
-                base_options=BaseOptions(model_asset_path=str(model), delegate=BaseOptions.Delegate.CPU),
-                running_mode=vision.RunningMode.VIDEO, num_hands=1,
-                min_hand_detection_confidence=0.5, min_hand_presence_confidence=0.5,
-                min_tracking_confidence=0.5)
-            return cls(vision.HandLandmarker.create_from_options(opts))
-        except Exception:
-            return None
-
-    def count(self, frame_bgr, cv2) -> int:
-        import mediapipe as mp
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        result = self._lm.detect_for_video(image, int((time.monotonic() - self._t0) * 1000))
-        if not result.hand_landmarks:
-            self.points = None
-            return 0
-        lm = result.hand_landmarks[0]
-        h, w = frame_bgr.shape[:2]
-        self.points = [(int(p.x * w), int(p.y * h)) for p in lm]
-        return self.fingers_up([(p.x, p.y) for p in lm])
-
-    @classmethod
-    def fingers_up(cls, pts) -> int:
-        """Extended fingers from 21 (x, y) landmarks: a finger is up when its tip is further from the
-        wrist than its middle joint (works whatever way the hand is rotated); the thumb is up when its
-        tip is far from the index knuckle compared with the palm's size."""
-        def d(a, b):
-            return math.dist(pts[a], pts[b])
-        n = sum(1 for tip, pip in zip(cls._TIPS, cls._PIPS) if d(tip, 0) > d(pip, 0) * 1.1)
-        palm = d(0, 9) or 1e-6
-        if d(4, 5) / palm > 0.55 and d(4, 0) > d(3, 0):
-            n += 1
-        return n
+    def _run_counts(self, cv2, cap, gui, diag):
+        """Skin-colour fallback: count fingers in a box; 1/2 = scroll down/up, 3 identify, 4 screenshot."""
+        import numpy as np
+        diag.line("mode=skin-colour")
+        self.emit("gesture", "Hand control on (basic mode - install mediapipe for pointer control): keep your "
+                             "hand in the box; 1 finger = scroll down, 2 = up, 3 identify, 4 screenshot, "
+                             "open palm = stop.")
+        recent = collections.deque(maxlen=self.vote_frames)
+        current, since, next_fire = 0, time.time(), 0.0
+        while not self._stop.is_set():
+            frame = self._read(cap, cv2)
+            if frame is None:
+                time.sleep(0.01)
+                continue
+            h, w = frame.shape[:2]
+            x0, y0, x1, y1 = int(w * 0.55), int(h * 0.10), w - 10, int(h * 0.65)
+            recent.append(count_fingers(frame[y0:y1, x0:x1], cv2, np))
+            top, votes = collections.Counter(recent).most_common(1)[0]
+            count = top if votes * 2 > len(recent) else current
+            now = time.time()
+            if count != current:
+                current, since = count, now
+            held = now - since
+            label, acts = None, []
+            if count >= 5 and held >= self.hold_action:
+                self._stop.set()
+            elif count in (1, 2) and held >= self.hold_scroll:
+                label = "scroll down" if count == 1 else "scroll up"
+                self._scroll(up=(count == 2), held=held - self.hold_scroll)
+                acts.append(("scroll",))
+            elif count == 3 and held >= self.hold_action and now >= next_fire:
+                label = "identify"
+                self._fire_async(self._identify, frame.copy())
+                next_fire = now + self.cooldown
+            elif count == 4 and held >= self.hold_action and now >= next_fire:
+                label = "screenshot"
+                self._fire_async(self.runner, "take a screenshot")
+                next_fire = now + self.cooldown
+            diag.frame(now, count > 0, str(count), acts)
+            if gui:
+                ready = count and held >= (self.hold_scroll if count in (1, 2) else self.hold_action)
+                colour = (0, 255, 0) if ready else (0, 180, 180)
+                cv2.rectangle(frame, (x0, y0), (x1, y1), colour, 2)
+                cv2.putText(frame, f"Fingers: {count}", (12, 34), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+                if label:
+                    cv2.putText(frame, label, (12, 74), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2)
+            shown = self._show(cv2, frame, gui)
+            if shown is None:
+                break
+            gui = gui and shown
 
 
 def count_fingers(roi, cv2, np) -> int:
@@ -306,9 +593,10 @@ def count_fingers(roi, cv2, np) -> int:
 
 # ---- module-level singleton -------------------------------------------------------------------
 
-_ON_MSG = ("Hand control is ON - watch the webcam window. Hold 1 finger to scroll DOWN, 2 to scroll UP "
-           "(it speeds up the longer you hold); 3 = identify what you're holding, 4 = screenshot; "
-           "open palm = stop (or say 'stop watching my hands').")
+_ON_MSG = ("Hand control is ON - watch the webcam window. Point with your index finger to move the pointer, "
+           "pinch thumb+index to click (twice = double-click, hold and move = drag), thumb+middle = "
+           "right-click, two fingers = scroll (move your hand up/down), 3 fingers = identify, 4 = "
+           "screenshot; open palm = stop (or say 'stop watching my hands').")
 
 
 class _ProcessController:

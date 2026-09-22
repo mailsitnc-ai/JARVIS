@@ -287,6 +287,87 @@ def scroll_pixels(pixels: int, up: bool) -> None:
         scroll(100, up)
 
 
+# ---- mouse pointer (hand control) --------------------------------------------------------------
+
+def screen_size() -> tuple[int, int]:
+    """Main display size in the units mouse events use (points on macOS, pixels on Windows)."""
+    try:
+        if IS_MAC:
+            import Quartz
+            b = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
+            return int(b.size.width), int(b.size.height)
+        if IS_WINDOWS:
+            import ctypes
+            u = ctypes.windll.user32
+            return int(u.GetSystemMetrics(0)), int(u.GetSystemMetrics(1))
+    except Exception:
+        pass
+    return 1440, 900
+
+
+def mouse_position() -> tuple[int, int] | None:
+    try:
+        if IS_MAC:
+            import Quartz
+            p = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+            return int(p.x), int(p.y)
+        if IS_WINDOWS:
+            import ctypes
+
+            class _P(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+            pt = _P()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            return pt.x, pt.y
+    except Exception:
+        pass
+    return None
+
+
+def can_control_mouse(request: bool = False) -> bool | None:
+    """macOS: may this process post mouse/scroll events (Accessibility)? request=True shows the system
+    prompt. None when unknown/not applicable."""
+    if not IS_MAC:
+        return True if IS_WINDOWS else None
+    try:
+        import Quartz
+        if Quartz.CGPreflightPostEventAccess():
+            return True
+        if request:
+            Quartz.CGRequestPostEventAccess()
+        return False
+    except Exception:
+        return None
+
+
+def mouse_event(kind: str, x: float, y: float, button: str = "left", clicks: int = 1) -> None:
+    """Post a real OS mouse event at screen (x, y). kind: move | down | up | drag. Best-effort (macOS
+    needs Accessibility permission for the process posting events)."""
+    x, y = int(x), int(y)
+    try:
+        if IS_MAC:
+            import Quartz
+            right = button == "right"
+            types = {"move": Quartz.kCGEventMouseMoved,
+                     "down": Quartz.kCGEventRightMouseDown if right else Quartz.kCGEventLeftMouseDown,
+                     "up": Quartz.kCGEventRightMouseUp if right else Quartz.kCGEventLeftMouseUp,
+                     "drag": Quartz.kCGEventRightMouseDragged if right else Quartz.kCGEventLeftMouseDragged}
+            ev = Quartz.CGEventCreateMouseEvent(None, types[kind], (x, y),
+                                                Quartz.kCGMouseButtonRight if right else Quartz.kCGMouseButtonLeft)
+            if kind in ("down", "up"):
+                Quartz.CGEventSetIntegerValueField(ev, Quartz.kCGMouseEventClickState, max(1, int(clicks)))
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        elif IS_WINDOWS:
+            import ctypes
+            u = ctypes.windll.user32
+            u.SetCursorPos(x, y)
+            flags = {("down", "left"): 0x2, ("up", "left"): 0x4, ("down", "right"): 0x8, ("up", "right"): 0x10}
+            if (kind, button) in flags:
+                u.mouse_event(flags[(kind, button)], 0, 0, 0, 0)
+    except Exception:
+        pass
+
+
 # ---- camera (macOS TCC permission + the right OpenCV backend) ---------------------------------
 
 def camera_backend(cv2):
