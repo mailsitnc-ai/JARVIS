@@ -539,6 +539,14 @@ def _key_problem(key: str) -> str | None:
 
 
 def cmd_setkey(args) -> int:
+    if not args.provider:
+        # Bare `jarvis setkey`: ask for every cloud key in turn (Enter on an empty prompt skips one).
+        worst = 0
+        for name in keystore.ENV_VARS:
+            print(f"\n== {name} ==  (press Enter without pasting to skip)")
+            worst = max(worst, cmd_setkey(argparse.Namespace(provider=name, clear=False, show=args.show,
+                                                             skippable=True)))
+        return worst
     provider = args.provider.lower()
     if provider not in keystore.ENV_VARS:
         print(f"Unknown provider '{provider}'. Keys are only needed for: {', '.join(keystore.ENV_VARS)}")
@@ -549,16 +557,21 @@ def cmd_setkey(args) -> int:
     hints = {"groq": "console.groq.com", "gemini": "aistudio.google.com/apikey"}
     if provider in hints:
         print(f"Get a {provider} key at {hints[provider]}")
-    print("Tip: paste with RIGHT-CLICK or Ctrl+Shift+V - Ctrl+V does not paste in a terminal.")
+    from .oslayer import IS_MAC
+    print("Tip: paste with Cmd+V - the key stays hidden while you paste, that's normal." if IS_MAC else
+          "Tip: paste with RIGHT-CLICK or Ctrl+Shift+V - Ctrl+V does not paste in a terminal.")
     if args.show:
         key = input(f"Paste your {provider} API key: ").strip()
     else:
         key = getpass.getpass(f"Paste your {provider} API key (hidden; press Enter after pasting): ").strip()
 
+    if not key and getattr(args, "skippable", False):
+        print(f"Skipped {provider} (kept whatever was stored).")
+        return 0
     problem = _key_problem(key)
     if problem:
         print(f"That didn't look like a valid key ({problem}).")
-        print("Paste with right-click (or Ctrl+Shift+V). If it keeps failing, run:  jarvis setkey "
+        print("Paste it again. If it keeps failing, run:  jarvis setkey "
               f"{provider} --show   to paste it visibly, or set the {keystore.ENV_VARS[provider]} "
               "environment variable instead.")
         return 1
@@ -757,7 +770,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(func=cmd_doctor)
 
     setkey = sub.add_parser("setkey", help="store an API key (encrypted, never changes provider selection)")
-    setkey.add_argument("provider")
+    setkey.add_argument("provider", nargs="?", help="groq or gemini; leave out to be asked for each")
     setkey.add_argument("--clear", action="store_true")
     setkey.add_argument("--show", action="store_true", help="paste the key visibly (if hidden paste won't work)")
     setkey.set_defaults(func=cmd_setkey)
