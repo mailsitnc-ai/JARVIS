@@ -70,20 +70,33 @@ class BrowserError(RuntimeError):
 
 # --- best-effort DOM scripts for web apps that have no personal send API (they can break if the site
 #     changes its markup; the fix_code / browser tools can be used to adjust the selectors). ---
-_WA_SEARCH_JS =("(function(q){var el=document.querySelector('div[contenteditable=\"true\"][data-tab=\"3\"]')"
-                 "||document.querySelector('div[title=\"Search input textbox\"]')"
-                 "||document.querySelector('div[contenteditable=\"true\"]');"
-                 "if(!el)return false;el.focus();"
-                 "document.execCommand&&document.execCommand('insertText',false,q);"
-                 "el.dispatchEvent(new InputEvent('input',{bubbles:true}));return true;})(%s)")
-_WA_OPEN_FIRST_JS = ("(function(){var r=document.querySelector('div[role=\"listitem\"]')"
-                     "||document.querySelector('#pane-side div[role=\"row\"]');"
-                     "if(r){r.click();return true;}return false;})()")
-_WA_TYPE_JS = ("(function(m){var el=document.querySelector('div[contenteditable=\"true\"][data-tab=\"10\"]')"
-               "||document.querySelector('footer div[contenteditable=\"true\"]');"
-               "if(!el)return false;el.focus();"
-               "document.execCommand&&document.execCommand('insertText',false,m);"
-               "el.dispatchEvent(new InputEvent('input',{bubbles:true}));return true;})(%s)")
+# WhatsApp Web's search box is now an <input> (it used to be a contenteditable div) - try both.
+_WA_FOCUS_SEARCH_JS = ("(function(){var el=document.querySelector('#side input[type=\"text\"]')"
+                       "||document.querySelector('input[aria-label*=\"Search\" i]')"
+                       "||document.querySelector('div[contenteditable=\"true\"][data-tab=\"3\"]');"
+                       "if(!el)return false;el.focus();if(el.select)el.select();"
+                       "else document.execCommand('selectAll',false,null);return true;})()")
+# Chat titles in the (search-filtered) chat list, top to bottom. Section headers have no span[title].
+_WA_RESULTS_JS = ("JSON.stringify(Array.prototype.slice.call(document.querySelectorAll('#pane-side div[role=\"row\"]'))"
+                  ".map(function(r,i){var s=r.querySelector('span[title]');return s?[i,s.getAttribute('title')]:null})"
+                  ".filter(Boolean))")
+# Centre of row i, scrolled into view - WhatsApp ignores synthetic JS clicks, so we click it with a
+# real CDP mouse event at these coordinates.
+_WA_ROW_POINT_JS = ("JSON.stringify((function(i){var r=document.querySelectorAll('#pane-side div[role=\"row\"]')[i];"
+                    "if(!r)return null;r.scrollIntoView({block:'center'});var b=r.getBoundingClientRect();"
+                    "return [b.x+b.width/2,b.y+b.height/2];})(%s))")
+# The open chat's name, from the conversation header.
+_WA_HEADER_JS = ("(function(){var h=document.querySelector('#main [data-testid=\"conversation-info-header\"]')"
+                 "||document.querySelector('#main header');if(!h)return '';"
+                 "var s=h.querySelector('span[dir=\"auto\"]')||h.querySelector('span[title]');"
+                 "return ((s&&(s.innerText||s.getAttribute('title')))||h.innerText.split('\\n')[0]||'').trim();})()")
+_WA_FOCUS_COMPOSE_JS = ("(function(){var el=document.querySelector('#main footer div[contenteditable=\"true\"]')"
+                        "||document.querySelector('footer div[contenteditable=\"true\"]')"
+                        "||document.querySelector('div[contenteditable=\"true\"][data-tab=\"10\"]');"
+                        "if(!el)return false;el.focus();return true;})()")
+# "WhatsApp is open in another window" -> click "Use here" so this tab takes over.
+_WA_USE_HERE_JS = ("(function(){var b=Array.prototype.slice.call(document.querySelectorAll('button,div[role=button]'))"
+                   ".find(function(e){return /use here/i.test(e.innerText||'')});if(b){b.click();return true}return false})()")
 _WA_SEND_READY_JS = ("!!(document.querySelector('button[aria-label=\"Send\"]')"
                      "||document.querySelector('span[data-icon=\"send\"]'))")
 _WA_CLICK_SEND_JS = ("(function(){var b=document.querySelector('button[aria-label=\"Send\"]')"
@@ -181,8 +194,12 @@ class ChromeController:
         except (OSError, ValueError):
             return []
 
-    def _page_target(self) -> dict:
+    def _page_target(self, prefer: str | None = None) -> dict:
         pages = [t for t in self._targets() if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+        if prefer:
+            for t in pages:
+                if str(t.get("url", "")).startswith(prefer):
+                    return t
         if pages:
             return pages[0]
         # No page tab (they were all closed): ask Chrome to open a blank one. Chrome >= 111 requires a
@@ -200,11 +217,28 @@ class ChromeController:
         raise BrowserError("Chrome is running but I couldn't open a tab to work in - close JARVIS's Chrome "
                            "window and try again so it relaunches cleanly.")
 
-    def _connect(self):
+    def _use_tab(self, url_prefix: str) -> bool:
+        """Attach to an already-open tab whose URL starts with url_prefix (e.g. the WhatsApp tab), so we
+        reuse it instead of loading a second copy. Returns True if such a tab exists."""
+        for t in self._targets():
+            if t.get("type") == "page" and str(t.get("url", "")).startswith(url_prefix):
+                if self._ws is not None and getattr(self, "_target_id", None) == t.get("id"):
+                    return True
+                self.close()
+                self._connect(prefer=url_prefix)
+                try:
+                    self._cmd("Target.activateTarget", {"targetId": t.get("id")}, timeout=5)
+                except BrowserError:
+                    pass
+                return True
+        return False
+
+    def _connect(self, prefer: str | None = None):
         if self._ws is not None:
             return self._ws
         websocket = self._import_ws()
-        target = self._page_target()
+        target = self._page_target(prefer)
+        self._target_id = target.get("id")
         # suppress_origin: recent Chrome 403-rejects a DevTools websocket that carries an Origin header
         # ("Rejected an incoming WebSocket connection from the ... origin"). DevTools clients send none.
         self._ws = websocket.create_connection(target["webSocketDebuggerUrl"], timeout=20,
@@ -213,6 +247,27 @@ class ChromeController:
         return self._ws
 
     def _cmd(self, method: str, params: dict | None = None, timeout: float = 20):
+        """Send one CDP command. The connection is cached across calls, so if the tab/window was closed
+        or Chrome restarted since, the socket is dead - drop it and retry once on a fresh tab."""
+        try:
+            return self._cmd_once(method, params, timeout)
+        except (OSError, EOFError) as exc:  # ConnectionResetError, socket timeouts
+            err = exc
+        except Exception as exc:  # websocket-client's own WebSocket*Exception types
+            if not type(exc).__name__.startswith("WebSocket"):
+                raise
+            err = exc
+        self.close()
+        try:
+            self.ensure()
+            return self._cmd_once(method, params, timeout)
+        except BrowserError:
+            raise
+        except Exception as exc:
+            raise BrowserError(f"lost the connection to Chrome ({type(err).__name__}) and couldn't "
+                               f"reconnect: {exc}") from exc
+
+    def _cmd_once(self, method: str, params: dict | None = None, timeout: float = 20):
         ws = self._connect()
         self._msg_id += 1
         mid = self._msg_id
@@ -345,34 +400,125 @@ class ChromeController:
         return ("Not linked yet. The WhatsApp Web window is open in JARVIS's Chrome — scan the QR (Linked "
                 "devices) whenever you're ready; once linked it stays linked and future sends are instant.")
 
+    def _key(self, key: str, code: int) -> None:
+        """A real key press (CDP input event), which web apps can't tell apart from the keyboard."""
+        for kind in ("keyDown", "keyUp"):
+            self._cmd("Input.dispatchKeyEvent", {"type": kind, "key": key, "code": key,
+                                                 "windowsVirtualKeyCode": code, "nativeVirtualKeyCode": code})
+
+    def click_at(self, x: float, y: float) -> None:
+        """A real left click at viewport coordinates (CDP input event)."""
+        for kind in ("mouseMoved", "mousePressed", "mouseReleased"):
+            self._cmd("Input.dispatchMouseEvent", {"type": kind, "x": x, "y": y, "button": "left",
+                                                   "clickCount": 0 if kind == "mouseMoved" else 1})
+
+    @staticmethod
+    def _norm(name: str) -> str:
+        return " ".join(re.sub(r"[^\w\s]", " ", (name or "").lower()).split())
+
+    @classmethod
+    def _match_score(cls, wanted: str, title: str) -> int:
+        """How well a chat title matches the name asked for (0 = not a match)."""
+        w, t = cls._norm(wanted), cls._norm(title)
+        if not w or not t:
+            return 0
+        if t == w:
+            return 100
+        tw = t.split()
+        if tw[:len(w.split())] == w.split():
+            return 80  # "inaya" -> "Inaya Khan"
+        if all(word in tw for word in w.split()):
+            return 60  # every word of the name appears as a whole word
+        if t.startswith(w):
+            return 40
+        # Spelling slips ("shashwat ma boi" vs "Shaswat My Boi"): close enough overall, word by word.
+        import difflib
+        ratio = difflib.SequenceMatcher(None, w, t).ratio()
+        return 30 if ratio >= 0.75 else 0
+
+    def _wa_search(self, to: str, query: str):
+        """Type `query` into WhatsApp's search and return the best (score, -i, row, title) for `to`."""
+        if not self.evaluate(_WA_FOCUS_SEARCH_JS):
+            raise BrowserError("couldn't find WhatsApp's search box (the layout may have changed)")
+        self._key("Backspace", 8)  # clear any previous search (the text is selected)
+        self._cmd("Input.insertText", {"text": query})
+        best, deadline = None, time.monotonic() + 4
+        while time.monotonic() < deadline:
+            time.sleep(0.4)
+            rows = json.loads(self.evaluate(_WA_RESULTS_JS) or "[]")
+            scored = sorted(((self._match_score(to, title), -i, i, title) for i, title in rows), reverse=True)
+            if scored and scored[0][0] > 0:
+                best = scored[0]
+                if best[0] >= 80:
+                    break
+        return best
+
+    def _wa_open_chat(self, to: str) -> str | None:
+        """Search WhatsApp Web for `to` and open the chat whose name really matches. Returns the opened
+        chat's title, or None if nothing matched - never falls back to 'whatever chat is on top'."""
+        # WhatsApp's own search is a literal substring match, so a misspelt name finds nothing - fall
+        # back to searching just the first word and fuzzy-matching the titles that come back.
+        queries = [to] + ([to.split()[0]] if len(to.split()) > 1 else [])
+        best = None
+        for query in queries:
+            best = self._wa_search(to, query)
+            if best:
+                break
+        if not best:
+            return None
+        _, _, row, title = best
+        point = json.loads(self.evaluate(_WA_ROW_POINT_JS % row) or "null")
+        if not point:
+            return None
+        self.click_at(*point)
+        if self._wait_for(f"({_WA_HEADER_JS}) === {json.dumps(title)}", 5):
+            return title
+        header = self.evaluate(_WA_HEADER_JS) or ""
+        return header if self._match_score(to, header) else None
+
     def whatsapp_send(self, to: str, message: str) -> str:
-        """Send a WhatsApp message via WhatsApp Web. Reliable with a phone number (uses the send deep
-        link); name-based search is best-effort. Needs WhatsApp Web logged in (QR scanned) in this Chrome."""
+        """Send a WhatsApp message via WhatsApp Web, as the user's linked device. `to` can be a contact
+        name, a group name or a phone number. Checks the opened chat really is `to` before typing."""
         self.ensure()
-        self._prepare_whatsapp()
         digits = re.sub(r"\D", "", to or "")
         by_phone = bool(digits) and (str(to).strip().startswith("+") or len(digits) >= 8)
+        # Reuse an open WhatsApp tab (a second WA tab shows "open in another window" and blocks).
+        on_wa = self._use_tab("https://web.whatsapp.com")
+        self._prepare_whatsapp()
         if by_phone:
-            self.navigate(f"https://web.whatsapp.com/send?phone={digits}&text={urllib.parse.quote(message)}", wait=30)
+            self.navigate(f"https://web.whatsapp.com/send?phone={digits}", wait=30)
+        elif not (on_wa and self._wa_logged_in()):
+            self.navigate("https://web.whatsapp.com", wait=30)
+        self.evaluate(_WA_USE_HERE_JS)
+        if not self._wait_for(self._WA_LOGGED_IN_JS, 40):
+            return ("WhatsApp Web isn't linked yet. Say 'log in to WhatsApp' once — I'll open it so you "
+                    "can scan the QR, and it stays linked after that.")
+        if by_phone:
+            if not self._wait_for(_WA_FOCUS_COMPOSE_JS.replace("el.focus();return true", "return true"), 25):
+                return f"WhatsApp couldn't open a chat with {to} - is that number on WhatsApp?"
+            chat = to
         else:
-            # Reuse the already-open WhatsApp tab if we're linked - don't reload (fast, no flicker).
-            on_wa = str(self.current_url()).startswith("https://web.whatsapp.com")
-            if not (on_wa and self._wa_logged_in()):
-                self.navigate("https://web.whatsapp.com", wait=30)
-            if not self._wait_for(self._WA_LOGGED_IN_JS, 12 if self._wa_logged_in() else 40):
-                return ("WhatsApp Web isn't linked yet. Say 'log in to WhatsApp' once — I'll open it so you "
-                        "can scan the QR, and it stays linked after that (I won't need to reopen it to send).")
-            self.evaluate(_WA_SEARCH_JS % json.dumps(to))
-            time.sleep(1.8)
-            if not self.evaluate(_WA_OPEN_FIRST_JS):
-                return f"I couldn't find a WhatsApp chat for '{to}'. Try giving the phone number instead."
-            time.sleep(1.2)
-            self.evaluate(_WA_TYPE_JS % json.dumps(message))
-        if not self._wait_for(_WA_SEND_READY_JS, 30):
-            return "WhatsApp Web didn't get ready to send (not logged in, or the page changed)."
-        time.sleep(0.5)
-        return (f"Sent the WhatsApp message to {to}." if self.evaluate(_WA_CLICK_SEND_JS)
-                else "I opened the chat but couldn't click Send - WhatsApp Web may have changed its layout.")
+            chat = self._wa_open_chat(to)
+            if not chat:
+                return (f"I couldn't find a WhatsApp chat matching '{to}'. Say the name as it's saved in "
+                        f"WhatsApp, or give the phone number.")
+        if not self._wait_for(_WA_FOCUS_COMPOSE_JS, 10):
+            return f"I opened the chat with {chat} but couldn't find the message box."
+        lines = message.split("\n")
+        for i, line in enumerate(lines):  # Shift+Enter between lines; a bare Enter would send early
+            if i:
+                self._cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter",
+                                                     "modifiers": 8, "windowsVirtualKeyCode": 13})
+                self._cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter",
+                                                     "modifiers": 8, "windowsVirtualKeyCode": 13})
+            if line:
+                self._cmd("Input.insertText", {"text": line})
+        if not self._wait_for(_WA_SEND_READY_JS, 10):
+            return f"I typed the message to {chat} but WhatsApp's Send button never appeared."
+        time.sleep(0.3)
+        if not self.evaluate(_WA_CLICK_SEND_JS):
+            self._key("Enter", 13)
+        return f"Sent the WhatsApp message to {chat}."
 
     def chat_send(self, to: str, message: str) -> str:
         """Send a Google Chat message via chat.google.com. Best-effort DOM automation; needs Chat signed

@@ -20,7 +20,7 @@ SKILL = {
         r"\b(?:in|to)\s+(?:my\s+)?google\s+doc",
         r"\bsearch\b[^.\n]*\bmy\s+docs?\b",
     ],
-    "version": 1,
+    "version": 2,
     "origin": "builtin",
 }
 _DOC_SYSTEM = ("You write the text contents of a Google Doc. Use '# ' for the title line, '## ' for "
@@ -47,15 +47,37 @@ def _topic(request):
     return m.group(1).strip().strip("\"'") if m else None
 
 
+# Words that describe a doc rather than name one ("a random doc", "a new document", "google docs").
+_GENERIC = {"a", "an", "the", "my", "new", "random", "blank", "empty", "fresh", "google", "doc", "docs",
+            "document", "documents", "one", "any", "some", "and", "it", "this", "that"}
+
+
 def _doc_name(request):
-    """The name of an EXISTING doc referenced for read/edit ('my doc Report', 'the doc called X')."""
-    m = re.search(r"\b(?:doc(?:ument)?)\s+(?:called|named|titled\s+)?[\"']?([\w][\w '&\-]{1,60}?)[\"']?"
-                  r"(?:\s+(?:about|and|to|with|in|on)\b|[.\n?]|$)", request, re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    m = re.search(r"\b(?:in|to|from)\s+(?:my\s+)?(?:google\s+)?doc(?:ument)?\s+[\"']?([\w][\w '&\-]{1,60}?)[\"']?"
-                  r"(?:[.\n?]|$)", request, re.IGNORECASE)
-    return m.group(1).strip() if m else None
+    """The name of an EXISTING doc referenced for read/edit/open ('my doc Report', 'the doc called X',
+    'open INS document of hope'). None when the request only describes a doc ('a random doc')."""
+    pats = (
+        # "open X on (my) google docs" / "find my X" - the whole X, even when it contains "document"
+        r"\b(?:open|read|show|summari[sz]e|edit|find)\s+(?:my\s+|the\s+)?(.+?)\s+(?:on|in|from)\s+(?:my\s+)?"
+        r"google\s+(?:docs?|drive)\b",
+        r"\bgoogle\s+docs?\b.*?\b(?:open|find|read|show)\s+(?:my\s+|the\s+)(.+?)(?:[.\n?,]|$)",
+        r"\bdoc(?:ument)?\s+(?:called|named|titled)\s+[\"']?(.+?)[\"']?(?:\s+(?:and|to|with|on|in)\b|[.\n?,]|$)",
+        r"\b(?:in|to|into|from)\s+(?:my\s+|the\s+)?(?:google\s+)?doc(?:ument)?\s+[\"']?(.+?)[\"']?(?:[.\n?,]|$)",
+        r"\b(?:open|read|show|summari[sz]e|edit)\s+(?:my\s+|the\s+)?(.+?)\s+(?:google\s+)?doc(?:ument)?\b",
+        r"\b(?:open|read|show|summari[sz]e|edit)\s+(?:my\s+|the\s+)?(?:google\s+)?doc(?:ument)?\s+"
+        r"[\"']?(.+?)[\"']?(?:\s+(?:on|in|from)\s+(?:my\s+)?google\b|[.\n?,]|$)",
+        r"\b(?:my|the)\s+(.+?)\s+(?:google\s+)?doc(?:ument)?\b",
+    )
+    for pat in pats:
+        m = re.search(pat, request, re.IGNORECASE)
+        if not m:
+            continue
+        name = re.sub(r"\s+(?:on|in|from)\s+(?:my\s+)?google(?:\s+docs?|\s+drive)?$", "", m.group(1).strip(),
+                      flags=re.IGNORECASE).strip(" \"'")
+        words = [w for w in re.findall(r"[\w'&-]+", name.lower())]
+        if words and not all(w in _GENERIC for w in words) and len(name) <= 60 \
+                and not re.search(r"\b(?:and|type|write|put|with)\b", name, re.IGNORECASE):
+            return name
+    return None
 
 
 def _search_query(request):
@@ -66,55 +88,130 @@ def _search_query(request):
     return m.group(1).strip().strip("\"'") if m else None
 
 
+_CONTENT_VERB = re.compile(r"\b(?:type|write|put|add|append|insert|paste|fill)\b", re.IGNORECASE)
+_WRITE_SYSTEM = ("You write exactly the text a user asked to have put into a document - nothing else: no "
+                 "preamble like 'Sure' or 'Here is', no quotes around it, no explanation. If they asked for "
+                 "something of your choice (a fun fact, a poem, a random message), pick one yourself.")
+
+
+_DESCRIPTIVE = re.compile(r"^(?:in\s+)?(?:a|an|some|the|random|one|something|anything|your)\b|\bof\s+your\s+choice\b|"
+                          r"\b(?:random|something|fact|poem|story|essay|message|summary|paragraph|joke|list)\b",
+                          re.IGNORECASE)
+
+
+def _content_for(request, ask):
+    """The text to put in a doc, from the request: a quoted/explicit piece is used verbatim, anything
+    descriptive ('a fun fact of your choice', 'a message') is written by the model."""
+    q = re.search(r"[\"“](.+?)[\"”]", request)
+    if q:
+        return q.group(1).strip()
+    m = re.search(r"\b(?:saying|that\s+says|the\s+text\s+is)\s*:?\s*(.+)$", request, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # "type hello world into my doc Notes" -> literally "hello world"
+    m = re.search(r"\b(?:type|write|put|add|append|insert|paste)\s+(.+?)\s+(?:in|into|to|on)\s+(?:my\s+|the\s+|a\s+)?"
+                  r"(?:new\s+|random\s+)?(?:google\s+)?doc", request, re.IGNORECASE)
+    if m and not _DESCRIPTIVE.search(m.group(1)):
+        return m.group(1).strip()
+    if not ask:
+        return ""
+    text = str(ask(f"The user said: {request!r}\nWrite the text that should go into the document.",
+                   system=_WRITE_SYSTEM, temperature=0.7, max_tokens=900)).strip()
+    return "" if text.startswith("[") else text
+
+
+def _short_title(text, ask):
+    first = next((ln.strip("# ").strip() for ln in text.splitlines() if ln.strip()), "")
+    if first and len(first) <= 60 and text.lstrip().startswith("#"):
+        return first
+    if ask:
+        t = str(ask(f"Give a 2-5 word title for this document, and nothing else:\n\n{text[:800]}",
+                    temperature=0.3, max_tokens=20)).strip().strip("\"'#. ")
+        if t and not t.startswith("[") and len(t) <= 60:
+            return t
+    return "JARVIS note"
+
+
+def _link(result):
+    m = re.search(r"https://docs\.google\.com/\S+", result or "")
+    return m.group(0) if m else None
+
+
+def _open(actions, result):
+    """Open the doc a create/append returned, so the user sees it (not just a link in the panel)."""
+    url = _link(result)
+    if url:
+        try:
+            actions.open_url(url)
+            actions.remember_focus("url", url)
+        except Exception:
+            pass
+    return result
+
+
 def run(request, context):
     low = request.lower()
     actions = _actions(context)
     ask = context.get("llm")
+    dry = context.get("dry_run")
 
-    is_append = bool(re.search(r"\b(?:add|append|insert|type|put)\b", low)
-                     or re.search(r"\bwrite\b[^.\n]*\b(?:in|into|to)\s+(?:my\s+|the\s+)?(?:google\s+)?doc", low))
-    is_create = bool(re.search(r"\b(?:create|make|new|start|generate|draft)\b", low)
-                     or re.search(r"\bwrite\s+(?:me\s+)?(?:a|an|the)?\s*(?:new\s+)?(?:google\s+)?doc", low))
-    is_read = bool(re.search(r"\b(?:read|open|show|summari[sz]e|what'?s\s+in|get\s+me)\b", low))
-    is_search = bool(re.search(r"\b(?:search|find|look\s+for|list)\b", low))
+    name = _doc_name(request)
+    wants_create = bool(re.search(r"\b(?:create|make|new|start|generate|draft|random|blank)\b", low)
+                        or re.search(r"\bwrite\s+(?:me\s+)?(?:a|an)\s+(?:new\s+)?(?:google\s+)?doc", low))
+    wants_content = bool(_CONTENT_VERB.search(request))
+    wants_open = bool(re.search(r"\b(?:open|show|go\s+to|launch)\b", low))
+    wants_read = bool(re.search(r"\b(?:read|summari[sz]e|what'?s\s+in|get\s+me|tell\s+me\s+what)\b", low))
+    wants_search = bool(re.search(r"\b(?:search|find|look\s+for|list)\b", low))
 
-    # 1. Edit an existing doc.
-    if is_append and not is_create:
-        name = _doc_name(request)
-        if not name:
-            return "Which Google Doc should I add to? e.g. 'add a summary to my google doc Report'."
-        m = re.search(r"\b(?:add|append|insert|type|put|write)\s+(.+?)\s+(?:to|into|in)\b", request, re.IGNORECASE)
-        text = (m.group(1).strip().strip("\"'") if m else "").strip()
-        if text and ask and len(text.split()) <= 4:   # a short topic -> expand it into real content
-            text = str(ask(f"Write a section to add to a Google Doc. Topic: {text}", system=_DOC_SYSTEM,
-                           temperature=0.4, max_tokens=800)).strip()
-        if not text:
-            return "What should I add to the doc?"
-        return "Would edit the doc." if context.get("dry_run") else actions.append_to_doc(name, text)
-
-    # 2. Create a new (formatted) doc.
-    if is_create:
-        title = _title(request) or _topic(request) or "Untitled"
-        if context.get("dry_run"):
-            return f"Would create a Google Doc '{title}'."
-        topic = _topic(request)
-        content = ""
-        if topic and ask:
+    # 1. New doc: "make a random doc and put a fun fact", "open google docs and type a message",
+    #    "create a google doc titled Trip Plan about Japan". Written, then opened for the user to see.
+    if wants_create or (wants_content and not name):
+        title = _title(request)
+        if dry:
+            return f"Would create a Google Doc '{title or 'new doc'}' and open it."
+        topic = _topic(request) if title else None
+        if title and topic and ask and not wants_content:
             content = str(ask(f"Write a Google Doc titled {title!r} about: {topic}", system=_DOC_SYSTEM,
                               temperature=0.4, max_tokens=1500)).strip()
-        elif ask and not _title(request):
-            content = str(ask(f"Write a Google Doc for this request: {request}", system=_DOC_SYSTEM,
-                              temperature=0.4, max_tokens=1500)).strip()
-        if content and not content.startswith(("# ", "#\t")):
-            content = f"# {title}\n\n{content}"     # ensure a styled title line
-        return actions.create_doc(title, content)
+        else:
+            content = _content_for(request, ask) if (wants_content or not title) else ""
+        if content.startswith("["):
+            content = ""
+        title = title or (_short_title(content, ask) if content else "Untitled")
+        return _open(actions, actions.create_doc(title, content))
 
-    # 3. Read / summarise an existing doc.
-    if is_read and not is_search:
-        name = _doc_name(request) or _search_query(request)
+    # 2. Add to an existing doc: "type hello into my doc Notes".
+    if name and wants_content:
+        if dry:
+            return f"Would add text to the Google Doc '{name}' and open it."
+        text = _content_for(request, ask)
+        if not text:
+            return f"What should I add to '{name}'?"
+        return _open(actions, actions.append_to_doc(name, text))
+
+    # 3. Open an existing doc in the browser: "open INS document of hope on google docs".
+    if name and wants_open and not wants_read:
+        if dry:
+            return f"Would open the Google Doc '{name}'."
+        found = actions.search_docs(name)
+        url = _link(found)
+        if not url:
+            return found
+        actions.open_url(url)
+        actions.remember_focus("url", url)
+        title = found.splitlines()[1].lstrip("- ").rsplit("  http", 1)[0] if "\n" in found else name
+        return f"Opened '{title}'."
+
+    # 4. Just "open google docs" -> the Docs home page.
+    if wants_open and not name and not wants_read and not wants_search:
+        return "Would open Google Docs." if dry else actions.open_url("https://docs.google.com/document/u/0/")
+
+    # 5. Read / summarise an existing doc.
+    if wants_read and not wants_search:
+        name = name or _search_query(request)
         if not name:
             return "Which Google Doc should I read? e.g. 'read my google doc Trip Plan'."
-        if context.get("dry_run"):
+        if dry:
             return f"Would read the Google Doc '{name}'."
         text = actions.read_doc(name)
         if not isinstance(text, str) or text.startswith(("I couldn't find", "Google isn't", "[Google")):
@@ -126,10 +223,10 @@ def run(request, context):
                 return summary.strip()
         return text
 
-    # 4. Search.
-    if context.get("dry_run"):
+    # 6. Search.
+    if dry:
         return "Would search your Google Docs."
-    query = _search_query(request) or _title(request) or _doc_name(request)
+    query = _search_query(request) or _title(request) or name
     if not query:
         return "What should I search your Google Docs for?"
     return actions.search_docs(query)

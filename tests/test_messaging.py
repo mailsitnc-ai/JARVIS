@@ -163,20 +163,64 @@ class RoutingHazardTests(IsolatedCase):
             self.assertIn("speak_text", names, cmd)
 
 
+class RealPhrasingTests(unittest.TestCase):
+    """Commands the user actually typed that used to be mis-parsed."""
+    def test_real_phrasings(self):
+        from core.messaging import parse_message_command as p
+        cases = {
+            "open whatsapp and send a message to inaya, the message is hi, testing 123":
+                ("inaya", False, "hi, testing 123"),
+            "send a message to Inaya on whatsapp the message is HI, im jarvis": ("Inaya", False, "HI, im jarvis"),
+            "open whatsapp and type 1+1 = 2, and then send that to 97700 94860": ("9770094860", False, "1+1 = 2"),
+            "message inaya on whatsapp hi how are you": ("inaya", False, "hi how are you"),
+            "tell inaya on whatsapp that I'll be late": ("inaya", False, "I'll be late"),
+        }
+        for cmd, want in cases.items():
+            self.assertEqual(p(cmd), want, cmd)
+
+
 class WhatsAppDeepLinkTests(unittest.TestCase):
-    def test_phone_uses_send_deeplink_and_clicks_send(self):
+    def _controller(self):
         from core.browser import ChromeController
         c = ChromeController()
         c.ensure = lambda: None
         c._prepare_whatsapp = lambda: None
-        navigated = {}
-        c.navigate = lambda url, wait=15: navigated.update(url=url)
+        c._use_tab = lambda prefix: False
+        c.navigated = []
+        c.navigate = lambda url, wait=15: c.navigated.append(url)
         c._wait_for = lambda expr, timeout=25: True
-        c.evaluate = lambda expr: True  # send button present + click succeeds
+        c.cdp = []
+        c._cmd = lambda method, params=None, timeout=20: c.cdp.append((method, params)) or {}
+        return c
+
+    def test_phone_uses_send_deeplink_and_types_with_real_input(self):
+        c = self._controller()
+        c.evaluate = lambda expr: True  # compose box + send button present, click succeeds
         out = c.whatsapp_send("+14155551234", "hello there")
-        self.assertIn("web.whatsapp.com/send?phone=14155551234", navigated["url"])
-        self.assertIn("hello%20there", navigated["url"])
+        self.assertIn("web.whatsapp.com/send?phone=14155551234", c.navigated[0])
+        self.assertIn(("Input.insertText", {"text": "hello there"}), c.cdp)
         self.assertIn("Sent the WhatsApp message", out)
+
+    def test_name_with_no_matching_chat_never_sends(self):
+        import json
+        from core import browser
+        c = self._controller()
+
+        def evaluate(expr):
+            if expr == browser._WA_RESULTS_JS:  # search results: nobody like "Inaya"
+                return json.dumps([[1, "Mom"], [2, "Work group"]])
+            return True
+        c.evaluate = evaluate
+        out = c.whatsapp_send("Inaya", "hi")
+        self.assertIn("couldn't find a WhatsApp chat", out)
+        self.assertNotIn(("Input.insertText", {"text": "hi"}), c.cdp)
+
+    def test_match_score_prefers_real_name_matches(self):
+        from core.browser import ChromeController as C
+        self.assertEqual(C._match_score("maa paa", "Maa Paa"), 100)
+        self.assertGreater(C._match_score("inaya", "Inaya Khan"), C._match_score("inaya", "Nayana Metina"))
+        self.assertEqual(C._match_score("inaya", "Nayana Metina"), 0)
+        self.assertGreater(C._match_score("shashwat ma boi", "Shaswat My Boi"), 0)
 
 
 if __name__ == "__main__":

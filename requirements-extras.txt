@@ -11,3 +11,11 @@ pyobjc-framework-AVFoundation>=9.0 ; sys_platform == "darwin"
 
 # macOS/Linux: global hotkey to summon the panel (needs Accessibility permission on macOS)
 pynput>=1.7 ; sys_platform != "win32"
+
+# macOS (Apple Silicon): accurate hand tracking for gesture control (MediaPipe hand landmarks). Without it
+# JARVIS falls back to skin-colour finger counting. Pinned: mediapipe 1.0.x crashes on macOS (its detector
+# forces the Metal GPU path - "graph_service.h: Service is unavailable"). It pulls opencv-contrib-python,
+# which replaces opencv-python (they share the cv2 folder - uninstall opencv-python first).
+# Also needs the model, once:
+#   mkdir -p ~/Library/Application\ Support/JARVIS/models && curl -L -o ~/Library/Application\ Support/JARVIS/models/hand_landmarker.task https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
+mediapipe==0.10.21 ; sys_platform == "darwin" and platform_machine == "arm64"

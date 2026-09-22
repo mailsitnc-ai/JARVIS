@@ -53,6 +53,8 @@ _MSG_CHANNEL = re.compile(r"\bwhats?app\b|\bwhat'?s\s?app\b|\bgoogle\s+chat\b|\b
 _MSG_BODY = re.compile(r"\bsaying\b|\bthat\s+says\b|\bthe\s+(?:message|text)\s+is\b|:|\s[-–—]\s|"
                        r"[\"“]", re.IGNORECASE)
 _MSG_SKILLS = ("whatsapp", "google_chat")
+# "open google docs and type X", "make a random google doc and put Y": one Docs job, not 3 steps.
+_GDOCS = re.compile(r"\bgoogle\s+docs?\b", re.IGNORECASE)
 
 # "improve/upgrade/fix your <name> skill": rewrite an existing evolved skill rather than build a new one.
 _IMPROVE_VERB = re.compile(r"\b(improve|upgrade|enhance|optimi[sz]e|refine|rewrite|fix|make\s+\w+\s+better|better)\b",
@@ -230,8 +232,18 @@ class Jarvis:
     def _direct_message_route(self, request: str):
         """An explicit WhatsApp/Google Chat send goes straight to the messaging skill, bypassing the
         multi-step splitter and evolution - its body legitimately contains commas/'and'/'saying'."""
-        if not (_MSG_CHANNEL.search(request) and _MSG_BODY.search(request)):
+        if _GDOCS.search(request) and not _MSG_CHANNEL.search(request):
+            cands = [s for s in self.candidates(request) if s.name == "google_docs"]
+            return self._try_skills(cands, request, "trigger") if cands else None
+        if not _MSG_CHANNEL.search(request):
             return None
+        if not _MSG_BODY.search(request):
+            # No "saying"/":" lead-in, but the parser still finds both a recipient and a body
+            # ("message inaya on whatsapp hi", "tell inaya on whatsapp that I'm late").
+            from core.messaging import parse_message_command
+            to, _, body = parse_message_command(request)
+            if not (to and body):
+                return None
         cands = [s for s in self.candidates(request) if s.name in _MSG_SKILLS]
         if not cands:
             return None

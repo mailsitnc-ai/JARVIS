@@ -199,7 +199,8 @@ class HotkeyListener(threading.Thread):
         parts = [p.strip() for p in spec.split("+") if p.strip()]
         if not parts:
             return None
-        return "+".join(mods.get(p, p) for p in parts)
+        # Named keys (space, enter, tab, esc, f1...) are written '<space>' in pynput; letters stay bare.
+        return "+".join(mods.get(p.lower()) or (p if len(p) == 1 else f"<{p.lower()}>") for p in parts)
 
     def _run_non_windows(self) -> None:
         """macOS/Linux global hotkey via pynput (needs Accessibility permission on macOS). Degrades to a

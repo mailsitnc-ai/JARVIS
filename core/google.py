@@ -182,6 +182,15 @@ class GoogleAuth:
         _save(data)
         return "Connected to Google Drive and Gmail."
 
+    last_error = None
+
+    def forget_access_token(self) -> None:
+        """Drop the cached access token (Google rejected it early) so the next call refreshes."""
+        data = _load()
+        if data.pop("access_token", None) is not None:
+            data.pop("expiry", None)
+            _save(data)
+
     def access_token(self) -> str | None:
         data = _load()
         if not data.get("refresh_token"):
@@ -191,6 +200,7 @@ class GoogleAuth:
         token = _post_token({"refresh_token": data["refresh_token"], "client_id": data["client_id"],
                              "client_secret": data["client_secret"], "grant_type": "refresh_token"})
         if "access_token" not in token:
+            self.last_error = token.get("error_description") or token.get("error")
             return None
         data["access_token"] = token["access_token"]
         data["expiry"] = time.time() + int(token.get("expires_in", 3600))
@@ -202,7 +212,29 @@ class GoogleClient:
     def __init__(self, auth: GoogleAuth | None = None):
         self.auth = auth or GoogleAuth()
 
-    def _get(self, url: str) -> dict:
+    def _authed(self, call, *args, **kwargs):
+        """Run an API call; if Google says 401 (token revoked/expired early), refresh once and retry.
+        If the refresh itself fails, say why in plain words instead of dumping the raw 401."""
+        try:
+            return call(*args, **kwargs)
+        except GoogleError as exc:
+            if not str(exc).startswith("HTTP 401"):
+                raise
+        self.auth.forget_access_token()
+        try:
+            return call(*args, **kwargs)
+        except GoogleError as exc:
+            reason = getattr(self.auth, "last_error", None) or str(exc)
+            if "client" in str(reason).lower():
+                raise GoogleError("Google rejected JARVIS's OAuth client (it was deleted or disabled in "
+                                  "Google Cloud Console). Create a new Desktop OAuth client, then run: "
+                                  "jarvis google setup  and  jarvis google login") from exc
+            raise GoogleError(f"Google sign-in expired ({reason}). Run: jarvis google login") from exc
+
+    def _get(self, *args, **kwargs):
+        return self._authed(self._get_once, *args, **kwargs)
+
+    def _get_once(self, url: str) -> dict:
         token = self.auth.access_token()
         if not token:
             raise GoogleError("not connected to Google")
@@ -215,7 +247,10 @@ class GoogleClient:
         except (urllib.error.URLError, OSError) as exc:
             raise GoogleError(str(getattr(exc, "reason", exc))) from exc
 
-    def _send(self, method: str, url: str, body: dict) -> dict:
+    def _send(self, *args, **kwargs):
+        return self._authed(self._send_once, *args, **kwargs)
+
+    def _send_once(self, method: str, url: str, body: dict) -> dict:
         token = self.auth.access_token()
         if not token:
             raise GoogleError("not connected to Google")
@@ -362,7 +397,10 @@ class GoogleClient:
         lines = [f"- {f.get('name', '(untitled)')}  {f.get('webViewLink', '')}".rstrip() for f in files]
         return f"Found {len(files)} in your Drive for '{query}':\n" + "\n".join(lines)
 
-    def _post(self, url: str, body: dict) -> dict:
+    def _post(self, *args, **kwargs):
+        return self._authed(self._post_once, *args, **kwargs)
+
+    def _post_once(self, url: str, body: dict) -> dict:
         token = self.auth.access_token()
         if not token:
             raise GoogleError("not connected to Google")

@@ -15,10 +15,19 @@ convex-hull defects. Gestures split into two kinds:
 
 Privacy: only runs from an explicit command you approve (broker gates it on the SENSITIVE 'camera'
 capability), never a background task. The preview window (or an open palm) stops it.
+
+On macOS the camera loop runs in its own process (`python -m core.gestures`): OpenCV's preview window
+must own the main thread there, which inside JARVIS belongs to the Tk panel. Events come back to the
+panel as JSON lines on stdout. Windows keeps the in-process thread.
 """
 from __future__ import annotations
 
+import collections
+import json
 import math
+import os
+import subprocess
+import sys
 import threading
 import time
 
@@ -28,15 +37,17 @@ _LOCK = threading.Lock()
 
 
 class GestureController:
-    def __init__(self, runner, emit=None, camera_index=0, stable_frames=12, cooldown=4.0,
-                 scroll_delta=100, scroll_every=2):
+    def __init__(self, runner, emit=None, camera_index=0, hold_scroll=0.2, hold_action=0.6, cooldown=3.0,
+                 scroll_px=(18, 70), ramp_secs=1.5, vote_frames=7):
         self.runner = runner or (lambda cmd: None)
         self.emit = emit or (lambda *a: None)
         self.camera_index = camera_index
-        self.stable_frames = stable_frames        # hold this many steady frames before anything fires (deliberate)
+        self.hold_scroll = hold_scroll            # seconds a scroll gesture must be steady before it starts
+        self.hold_action = hold_action            # ... and a one-shot (identify/screenshot/stop) before it fires
         self.cooldown = cooldown                  # seconds between one-shot fires
-        self.scroll_delta = scroll_delta          # wheel notches per scroll step
-        self.scroll_every = scroll_every          # scroll every Nth frame while held (lower = faster)
+        self.scroll_px = scroll_px                # (start, max) pixels per frame while scrolling
+        self.ramp_secs = ramp_secs                # holding longer speeds the scroll up to max over this time
+        self.vote_frames = vote_frames            # majority vote over this many frames (smooths flicker)
         self.error = None
         self._stop = threading.Event()
         self._thread = None
@@ -53,9 +64,11 @@ class GestureController:
 
     # ---- actions ------------------------------------------------------------------------------
 
-    def _scroll(self, up: bool):
-        from core.oslayer import scroll
-        scroll(self.scroll_delta, up)  # OS-level wheel event: Windows mouse_event / macOS Quartz
+    def _scroll(self, up: bool, held: float):
+        from core.oslayer import scroll_pixels
+        lo, hi = self.scroll_px
+        speed = lo + (hi - lo) * min(1.0, max(0.0, held) / self.ramp_secs)
+        scroll_pixels(int(speed), up)  # OS-level smooth wheel event: Windows mouse_event / macOS Quartz
 
     def _fire_async(self, fn, *args):
         threading.Thread(target=fn, args=args, daemon=True).start()
@@ -101,6 +114,9 @@ class GestureController:
             if cap:
                 cap.release()
             return
+        # 640x480 is plenty for counting fingers and far cheaper than the webcam's native 1080p.
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         gui = True                     # opencv-python-headless has no HighGUI - detect and run without a window
         try:
             cv2.namedWindow(_WINDOW, cv2.WINDOW_AUTOSIZE)
@@ -109,40 +125,50 @@ class GestureController:
             self.emit("gesture", "No preview window (headless OpenCV) - gestures still work; open palm to stop.")
         self.emit("gesture", "Hand control on - 1 down, 2 up (hold to keep scrolling), 3 identify, "
                              "4 screenshot; open palm = stop.")
-        last, stable, next_fire, tick = -1, 0, 0.0, 0
+        counter = LandmarkCounter.create()   # None -> skin-colour fallback inside the green box
+        self.emit("gesture", "Tracking with MediaPipe hand landmarks (hand anywhere in view)." if counter
+                  else "Tracking by skin colour - keep your hand inside the box.")
+        recent = collections.deque(maxlen=self.vote_frames)
+        current, since, next_fire = 0, time.time(), 0.0
         try:
             while not self._stop.is_set():
                 ok, frame = cap.read()
                 if not ok:
+                    time.sleep(0.01)
                     continue
+                if frame.shape[1] > 720:   # the camera ignored the size request - shrink it ourselves
+                    frame = cv2.resize(frame, (640, int(frame.shape[0] * 640 / frame.shape[1])))
                 frame = cv2.flip(frame, 1)
                 h, w = frame.shape[:2]
                 x0, y0, x1, y1 = int(w * 0.55), int(h * 0.10), w - 10, int(h * 0.65)
-                count = count_fingers(frame[y0:y1, x0:x1], cv2, np)
-                stable = stable + 1 if count == last else 1
-                last = count
+                raw = counter.count(frame, cv2) if counter else count_fingers(frame[y0:y1, x0:x1], cv2, np)
+                recent.append(raw)
+                # Majority vote: one misread frame no longer resets the gesture (that made scrolling
+                # stutter and stop). The count must hold a majority of the recent frames.
+                top, votes = collections.Counter(recent).most_common(1)[0]
+                count = top if votes * 2 > len(recent) else current
                 now = time.time()
+                if count != current:
+                    current, since = count, now
+                held = now - since
                 label = None
-                if stable >= self.stable_frames:
-                    if count >= 5:
-                        self._stop.set()
-                    elif count in (1, 2):                       # HOLD: scroll while shown
-                        label = "scroll down" if count == 1 else "scroll up"
-                        tick += 1
-                        if tick % self.scroll_every == 0:
-                            self._scroll(up=(count == 2))
-                    elif count == 3 and now >= next_fire:       # ONE-SHOT: identify (vision)
-                        label = "identify"
-                        self._fire_async(self._identify, frame.copy())
-                        next_fire = now + self.cooldown
-                    elif count == 4 and now >= next_fire:       # ONE-SHOT: screenshot
-                        label = "screenshot"
-                        self._fire_async(self.runner, "take a screenshot")
-                        next_fire = now + self.cooldown
-                else:
-                    tick = 0
+                if count >= 5 and held >= self.hold_action:
+                    self._stop.set()
+                elif count in (1, 2) and held >= self.hold_scroll:       # HOLD: scroll while shown
+                    label = "scroll down" if count == 1 else "scroll up"
+                    self._scroll(up=(count == 2), held=held - self.hold_scroll)
+                elif count == 3 and held >= self.hold_action and now >= next_fire:   # ONE-SHOT: identify
+                    label = "identify"
+                    self._fire_async(self._identify, frame.copy())
+                    next_fire = now + self.cooldown
+                elif count == 4 and held >= self.hold_action and now >= next_fire:   # ONE-SHOT: screenshot
+                    label = "screenshot"
+                    self._fire_async(self.runner, "take a screenshot")
+                    next_fire = now + self.cooldown
                 if gui:
-                    self._draw(frame, cv2, (x0, y0, x1, y1), count, label, stable)
+                    ready = count and held >= (self.hold_scroll if count in (1, 2) else self.hold_action)
+                    self._draw(frame, cv2, None if counter else (x0, y0, x1, y1), count, label, ready,
+                               counter.points if counter else None)
                     try:
                         cv2.imshow(_WINDOW, frame)
                         if (cv2.waitKey(1) & 0xFF) == ord("q") or \
@@ -151,7 +177,7 @@ class GestureController:
                     except cv2.error:
                         gui = False          # window died mid-run - keep going headless
                 else:
-                    time.sleep(0.03)         # no waitKey to pace us; ~30fps and easy on the CPU
+                    time.sleep(0.01)
         except Exception as exc:
             self.error = str(exc)
         finally:
@@ -163,15 +189,78 @@ class GestureController:
                 pass
             self.emit("gesture", "Hand control stopped.")
 
-    def _draw(self, frame, cv2, box, count, label, stable):
-        x0, y0, x1, y1 = box
-        ready = stable >= self.stable_frames
-        cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 255, 0) if ready else (0, 180, 180), 2)
+    def _draw(self, frame, cv2, box, count, label, ready, points=None):
+        colour = (0, 255, 0) if ready else (0, 180, 180)
+        if box:
+            x0, y0, x1, y1 = box
+            cv2.rectangle(frame, (x0, y0), (x1, y1), colour, 2)
+        for x, y in points or ():
+            cv2.circle(frame, (x, y), 4, colour, -1)
         cv2.putText(frame, f"Fingers: {count}", (12, 34), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
         cv2.putText(frame, "1 down  2 up (hold)  3 identify  4 shot  |  open palm = stop",
                     (12, frame.shape[0] - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
         if label:
             cv2.putText(frame, label, (12, 74), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2)
+
+
+class LandmarkCounter:
+    """Finger counting with MediaPipe's hand-landmark model (21 points per hand) - far steadier than skin
+    colour, works anywhere in the frame and in any lighting. Needs `pip install mediapipe` and the model
+    at <data dir>/models/hand_landmarker.task; `create()` returns None when either is missing, and the
+    caller falls back to count_fingers()."""
+
+    _TIPS, _PIPS = (8, 12, 16, 20), (6, 10, 14, 18)
+
+    def __init__(self, landmarker):
+        self._lm = landmarker
+        self._t0 = time.monotonic()
+        self.points = None           # last hand's landmarks in pixels, for the preview overlay
+
+    @classmethod
+    def create(cls):
+        try:
+            from mediapipe.tasks.python import BaseOptions, vision
+            from core.oslayer import user_data_dir
+        except Exception:
+            return None
+        model = user_data_dir() / "models" / "hand_landmarker.task"
+        if not model.is_file():
+            return None
+        try:
+            opts = vision.HandLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=str(model), delegate=BaseOptions.Delegate.CPU),
+                running_mode=vision.RunningMode.VIDEO, num_hands=1,
+                min_hand_detection_confidence=0.5, min_hand_presence_confidence=0.5,
+                min_tracking_confidence=0.5)
+            return cls(vision.HandLandmarker.create_from_options(opts))
+        except Exception:
+            return None
+
+    def count(self, frame_bgr, cv2) -> int:
+        import mediapipe as mp
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = self._lm.detect_for_video(image, int((time.monotonic() - self._t0) * 1000))
+        if not result.hand_landmarks:
+            self.points = None
+            return 0
+        lm = result.hand_landmarks[0]
+        h, w = frame_bgr.shape[:2]
+        self.points = [(int(p.x * w), int(p.y * h)) for p in lm]
+        return self.fingers_up([(p.x, p.y) for p in lm])
+
+    @classmethod
+    def fingers_up(cls, pts) -> int:
+        """Extended fingers from 21 (x, y) landmarks: a finger is up when its tip is further from the
+        wrist than its middle joint (works whatever way the hand is rotated); the thumb is up when its
+        tip is far from the index knuckle compared with the palm's size."""
+        def d(a, b):
+            return math.dist(pts[a], pts[b])
+        n = sum(1 for tip, pip in zip(cls._TIPS, cls._PIPS) if d(tip, 0) > d(pip, 0) * 1.1)
+        palm = d(0, 9) or 1e-6
+        if d(4, 5) / palm > 0.55 and d(4, 0) > d(3, 0):
+            n += 1
+        return n
 
 
 def count_fingers(roi, cv2, np) -> int:
@@ -217,19 +306,64 @@ def count_fingers(roi, cv2, np) -> int:
 
 # ---- module-level singleton -------------------------------------------------------------------
 
+_ON_MSG = ("Hand control is ON - watch the webcam window. Hold 1 finger to scroll DOWN, 2 to scroll UP "
+           "(it speeds up the longer you hold); 3 = identify what you're holding, 4 = screenshot; "
+           "open palm = stop (or say 'stop watching my hands').")
+
+
+class _ProcessController:
+    """Runs the camera loop in a child process (macOS: the preview window needs a main thread) and
+    relays its JSON-line events: {"emit": text} -> emit, {"run": command} -> runner."""
+
+    def __init__(self, runner, emit, camera_index):
+        self.runner = runner or (lambda cmd: None)
+        self.emit = emit or (lambda *a: None)
+        self.error = None
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.proc = subprocess.Popen([sys.executable, "-m", "core.gestures", str(camera_index)], cwd=root,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
+
+    def _read(self):
+        for line in self.proc.stdout:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if "error" in msg:
+                self.error = msg["error"]
+            elif "run" in msg:
+                threading.Thread(target=self.runner, args=(msg["run"],), daemon=True).start()
+            elif "emit" in msg:
+                self.emit("gesture", msg["emit"])
+
+    def running(self):
+        return self.proc.poll() is None
+
+    def stop(self):
+        if self.running():
+            self.proc.terminate()
+
+
 def start(runner, emit=None, camera_index=0) -> str:
     global _ACTIVE
     with _LOCK:
         if _ACTIVE is not None and _ACTIVE.running():
             return "Hand control is already on. Show an open palm (or say 'stop watching my hands')."
-        _ACTIVE = GestureController(runner, emit, camera_index)
-        _ACTIVE.start()
-    time.sleep(0.5)
+        if sys.platform == "darwin":
+            _ACTIVE = _ProcessController(runner, emit, camera_index)
+        else:
+            _ACTIVE = GestureController(runner, emit, camera_index)
+            _ACTIVE.start()
+    deadline = time.time() + 2.5   # the camera takes a moment to open; catch an early failure
+    while time.time() < deadline and _ACTIVE.running() and not _ACTIVE.error:
+        time.sleep(0.1)
     if _ACTIVE.error:
         return f"Couldn't start hand control: {_ACTIVE.error}"
-    return ("Hand control is ON - watch the webcam window. Hold 1 finger to scroll DOWN, 2 to scroll UP "
-            "(keeps going while you hold it); 3 = identify what you're holding, 4 = screenshot; "
-            "open palm = stop (or say 'stop watching my hands').")
+    if not _ACTIVE.running():
+        return "Couldn't start hand control: the camera loop exited straight away."
+    return _ON_MSG
 
 
 def stop() -> str:
@@ -243,3 +377,21 @@ def stop() -> str:
 def running() -> bool:
     with _LOCK:
         return _ACTIVE is not None and _ACTIVE.running()
+
+
+def _child_main(camera_index: int = 0) -> None:
+    """`python -m core.gestures`: the camera loop on this process's main thread, events as JSON lines."""
+    def out(**msg):
+        try:
+            print(json.dumps(msg), flush=True)
+        except (BrokenPipeError, ValueError):
+            os._exit(0)   # the panel went away - stop
+
+    ctl = GestureController(lambda cmd: out(run=cmd), lambda _kind, text: out(emit=text), camera_index)
+    ctl._run()
+    if ctl.error:
+        out(error=ctl.error)
+
+
+if __name__ == "__main__":
+    _child_main(int(sys.argv[1]) if len(sys.argv) > 1 else 0)

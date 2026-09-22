@@ -262,6 +262,27 @@ def scroll(amount: int, up: bool) -> None:
                 pass
 
 
+def scroll_pixels(pixels: int, up: bool) -> None:
+    """Smooth scroll by roughly `pixels` screen pixels (hand control calls this every frame while a
+    scroll gesture is held). macOS posts a pixel-unit wheel event; Windows a proportional wheel delta
+    (120 = one notch = ~3 lines ~= 100px)."""
+    pixels = max(1, int(abs(pixels)))
+    if IS_MAC:
+        try:
+            import Quartz
+            ev = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitPixel, 1,
+                                                      pixels if up else -pixels)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+            return
+        except Exception:
+            pass
+        scroll(100, up)
+    elif IS_WINDOWS:
+        scroll(max(1, int(pixels * 1.2)), up)
+    else:
+        scroll(100, up)
+
+
 # ---- camera (macOS TCC permission + the right OpenCV backend) ---------------------------------
 
 def camera_backend(cv2):

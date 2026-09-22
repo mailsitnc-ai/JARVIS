@@ -62,7 +62,9 @@ The first time each is used, macOS will prompt — or grant them ahead of time t
 Python app:
 
 - **Screen Recording** — for `screenshot` / "what's on my screen".
-- **Camera** — for photos, vision, hand-gesture control.
+- **Camera** — for photos, vision, hand-gesture control. For accurate hand tracking on Apple Silicon, install
+  `mediapipe==0.10.21` and the `hand_landmarker.task` model (exact commands in `requirements-extras.txt`);
+  without them hand control falls back to skin-colour detection.
 - **Accessibility** — for the global hotkey (pynput) and gesture-driven scrolling.
 - **Automation ▸ Terminal / Chrome** — for running programs in a window and driving Chrome.
 
