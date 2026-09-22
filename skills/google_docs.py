@@ -126,7 +126,7 @@ def _short_title(text, ask):
         return first
     if ask:
         t = str(ask(f"Give a 2-5 word title for this document, and nothing else:\n\n{text[:800]}",
-                    temperature=0.3, max_tokens=20)).strip().strip("\"'#. ")
+                    temperature=0.3, max_tokens=300)).strip().split("\n")[0].strip("\"'#. ")
         if t and not t.startswith("[") and len(t) <= 60:
             return t
     return "JARVIS note"

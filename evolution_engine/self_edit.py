@@ -92,7 +92,7 @@ class SelfEditor:
                   "Which ONE file should be edited to do this? Reply with just its path from the list.")
         try:
             answer = self.llm.complete(prompt, system="Reply with exactly one file path from the list, nothing else.",
-                                       temperature=0.0, max_tokens=40)
+                                       temperature=0.0, max_tokens=300)
         except LLMError:
             return None
         answer = str(answer).strip().strip("`'\"")

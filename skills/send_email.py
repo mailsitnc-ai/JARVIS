@@ -97,7 +97,7 @@ def run(request, context):
     if not subject:
         if ask is not None:
             subject = str(ask(f"Write a short (max 8 words) email subject line for this email body, "
-                              f"plain text only:\n\n{body[:800]}", temperature=0.3, max_tokens=30)).strip().strip("\"'")
+                              f"plain text only:\n\n{body[:800]}", temperature=0.3, max_tokens=300)).strip().split("\n")[0].strip("\"'")
         subject = (subject or body.splitlines()[0][:60]).strip() or "(no subject)"
 
     return actions.gmail_send(to, subject, body)

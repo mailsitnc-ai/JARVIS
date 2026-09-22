@@ -661,7 +661,7 @@ def cmd_doctor(args) -> int:
         router.on_progress = lambda message: print(f"  .. {message}", flush=True)
         started = time.monotonic()
         try:
-            text = router.complete("Reply with exactly: OK", temperature=0.0, max_tokens=32)
+            text = router.complete("Reply with exactly: OK", temperature=0.0, max_tokens=300)
             print(f"  live test: {router.last_provider} replied {text.strip()[:30]!r} in {time.monotonic() - started:.1f}s")
         except LLMError as exc:
             print(f"  live test failed: {exc}")
