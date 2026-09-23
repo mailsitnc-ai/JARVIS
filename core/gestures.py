@@ -84,8 +84,8 @@ class HandInterpreter:
     # MOVES, from wherever it is, so you can rest your elbow on the desk and keep your hand low - no
     # holding it up inside a box (that caused arm ache). Dropping your hand and raising it again just
     # re-centres, like lifting a mouse. "absolute" is the old fixed-box mapping (gestures.pointer_mode).
-    GAIN = 2600.0          # screen px per full-frame hand movement, before acceleration
-    ACCEL = (0.55, 2.2)    # slow hand = fine control, fast flick = across the screen
+    GAIN = 2000.0          # screen px per full-frame hand movement, before acceleration
+    ACCEL = (0.45, 1.7)    # slow hand = fine control, fast flick = across the screen
     BOX_W, BOX_H, BOX_CX, BOX_CY = 0.76, 0.62, 0.5, 0.45
     PINCH_ON, PINCH_OFF = 0.26, 0.40       # thumb-tip distance / palm size, with hysteresis
     PINCH_FRAMES = 2                       # a pinch must hold this many frames (passing shapes don't click)
@@ -102,13 +102,16 @@ class HandInterpreter:
         self.mode = "absolute" if str(mode).lower().startswith("abs") else "relative"
         self.gain = self.GAIN * speed
         self._anchor = None            # hand position when the current pointing gesture began
-        self._track_idx = 8            # index fingertip (knuckle while pinching)
+        self._track_idx = 8            # index fingertip (knuckle while pinching, palm centre while grabbing)
+        self.grab = False              # open palm then close = grab and drag, open again to let go
+        self.grab_ended = -1e9
+        self.palm_at = -1e9            # "no palm seen yet" - a fist at startup must not count as a grab
         w, h = min(0.98, self.BOX_W / speed), min(0.98, self.BOX_H / speed)
         cx = min(max(self.BOX_CX, w / 2), 1 - w / 2)
         cy = min(max(self.BOX_CY, h / 2), 1 - h / 2)
         self.BOX = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
-        # calmer than the defaults: more smoothing while nearly still, still quick on big moves
-        self.fx, self.fy = OneEuro(0.7, 2.5), OneEuro(0.7, 2.5)
+        # heavy smoothing while nearly still (hand tremor), still keeps up with a real move
+        self.fx, self.fy = OneEuro(0.45, 1.6), OneEuro(0.45, 1.6)
         self._cand, self._cand_frames = None, 0
         self.hand_since = None
         self.shape = None              # 3D landmarks for this frame, when MediaPipe provides them
@@ -176,6 +179,8 @@ class HandInterpreter:
         return raw
 
     SPREAD_PALM = 0.9      # index-to-pinky tip spread that says "open palm" rather than "four fingers"
+    GRAB_WINDOW = 1.2      # s: closing the hand this soon after opening it is a GRAB, not a stop
+    GRAB_GRACE = 1.5       # s after letting go before an open palm can stop hand control again
 
     def classify(self, p) -> str:
         thumb, i, m, r, k = self.fingers(p)
@@ -198,7 +203,7 @@ class HandInterpreter:
         """Where the pointer should be now. Normally the INDEX TIP, so just waggling the finger moves the
         pointer (no need to move the whole arm); while pinching it switches to the knuckle, which stays
         put as the finger closes, so a click doesn't drag the pointer with it."""
-        idx = 5 if self.pinch else 8
+        idx = 9 if self.grab else (5 if self.pinch else 8)
         if idx != self._track_idx:          # switch tracked point without the pointer jumping
             self._track_idx = idx
             self._anchor = None
@@ -236,6 +241,9 @@ class HandInterpreter:
         if p is None:                      # hand lost: never leave a button stuck down
             if self.pinch:
                 acts.append(("up", self.pinch))
+            if self.grab:
+                acts.append(("up", "left"))
+            self.grab, self.palm_at = False, -1e9
             self.pinch, self.scroll_anchor, self.label = None, None, ""
             self._cand, self._cand_frames, self.hand_since, self._anchor = None, 0, None, None
             self._track_idx = 8
@@ -256,7 +264,23 @@ class HandInterpreter:
             if pose != "two":
                 self.scroll_anchor = None
         held = t - self.pose_since
-        pointer = pose in ("point", "pinch") and (pose == "pinch" or held >= self.HOLD["point"])
+        # GRAB: open your palm, then close it - like picking something up. Moving the closed hand drags;
+        # opening it again drops. (Holding the palm OPEN is still the stop gesture.)
+        if pose == "palm":
+            self.palm_at = t
+        if not self.grab and pose == "fist" and 0 < t - self.palm_at <= self.GRAB_WINDOW:
+            self.grab = True
+            if self.pinch:                      # never hold two buttons at once
+                acts.append(("up", self.pinch))
+                self.pinch = None
+            acts.append(("down", "left", 1))
+            self.label = "grab"
+        elif self.grab and pose != "fist":
+            self.grab = False
+            self.grab_ended = t
+            acts.append(("up", "left"))
+            self.label = "let go"
+        pointer = self.grab or (pose in ("point", "pinch") and (pose == "pinch" or held >= self.HOLD["point"]))
         sx, sy = self._to_screen(p, t, pointer) or (self.cursor or (self.sw / 2, self.sh / 2))
 
         # pinch edges -> button down/up
@@ -278,9 +302,12 @@ class HandInterpreter:
         if pointer:
             frozen = self.pinch and t - self.pinch_since < self.CLICK_FREEZE
             if not frozen and (self.cursor is None or math.dist(self.cursor, (sx, sy)) >= self.DEADZONE):
-                acts.append(("drag" if self.pinch == "left" else "move", sx, sy))
+                acts.append(("drag" if (self.grab or self.pinch == "left") else "move", sx, sy))
                 self.cursor = (sx, sy)
-            self.label = {"left": "click / drag", "right": "right-click"}.get(self.pinch, "pointer")
+            if self.grab:
+                self.label = "grabbing - open your hand to drop"
+            else:
+                self.label = {"left": "click / drag", "right": "right-click"}.get(self.pinch, "pointer")
         elif pose == "two" and held >= self.HOLD["two"]:
             y = p[5][1]
             if self.scroll_anchor is None:
@@ -292,6 +319,8 @@ class HandInterpreter:
                 self.label = "scroll up" if off < 0 else "scroll down"
             else:
                 self.label = "scroll (move hand up/down)"
+        elif pose == "palm" and t - self.grab_ended < self.GRAB_GRACE:
+            self.label = "let go"            # the open hand that ended a grab must not stop hand control
         elif pose in ("three", "four", "palm") and held >= self.HOLD[pose] and t >= self.next_fire:
             acts.append({"three": ("identify",), "four": ("screenshot",), "palm": ("stop",)}[pose])
             self.label = {"three": "identify", "four": "screenshot", "palm": "stop"}[pose]
@@ -623,7 +652,8 @@ class GestureController:
         cv2.putText(frame, hand.label or ("no hand" if not pts else hand.pose), (12, 34),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, colour, 2)
         cv2.putText(frame, "point=move (hand anywhere - drop it to re-centre)  pinch=click/drag  "
-                           "fold index+thumb-middle=right  2=scroll  3=identify  4=shot  palm=stop",
+                           "open-then-close=grab  fold index+thumb-middle=right  2=scroll  3=identify  "
+                           "4=shot  hold palm=stop",
                     (8, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (220, 220, 220), 1)
 
     def _run_counts(self, cv2, cap, gui, diag):

@@ -266,6 +266,65 @@ class HandInterpreterTests(unittest.TestCase):
         self.assertIn("stop", self.kinds(self.feed(_hand("11111", spread=True), 55)))
 
 
+class GrabTests(unittest.TestCase):
+    """Open your palm, close it = grab; move to drag; open again to drop."""
+
+    def setUp(self):
+        from core.gestures import HandInterpreter
+        self.h = HandInterpreter((1000, 800))
+        self.t = 0.0
+
+    def feed(self, pts, frames=1, dt=1 / 30):
+        acts = []
+        for _ in range(frames):
+            self.t += dt
+            acts += self.h.update(pts, self.t)
+        return acts
+
+    def kinds(self, acts):
+        return [a[0] for a in acts]
+
+    def open_then_close(self):
+        self.feed(_hand("11111", spread=True), 8)      # palm open (well under the 1.3s stop hold)
+        return self.feed(_hand("00000"), 4)            # ...and closed
+
+    def test_open_then_close_grabs(self):
+        self.assertIn(("down", "left", 1), self.open_then_close())
+
+    def test_moving_a_closed_hand_drags(self):
+        self.open_then_close()
+        acts = []
+        for i in range(1, 12):
+            acts += self.feed([(x + 0.01 * i, y) for x, y in _hand("00000")], 1)
+        self.assertIn("drag", self.kinds(acts))
+
+    def test_opening_the_hand_lets_go(self):
+        self.open_then_close()
+        self.assertIn(("up", "left"), self.feed(_hand("11111", spread=True), 4))
+
+    def test_letting_go_does_not_stop_hand_control(self):
+        """The palm that releases a grab must not be read as the stop gesture."""
+        self.open_then_close()
+        acts = self.kinds(self.feed(_hand("11111", spread=True), 40))   # ~1.3s of open palm
+        self.assertIn("up", acts)
+        self.assertNotIn("stop", acts)
+
+    def test_a_fist_on_its_own_never_grabs(self):
+        self.assertNotIn("down", self.kinds(self.feed(_hand("00000"), 40)))
+
+    def test_closing_long_after_opening_is_not_a_grab(self):
+        self.feed(_hand("11111", spread=True), 8)
+        self.feed(_hand("01000"), 45)                  # 1.5s of something else in between
+        self.assertNotIn("down", self.kinds(self.feed(_hand("00000"), 5)))
+
+    def test_losing_the_hand_drops_what_it_was_holding(self):
+        self.open_then_close()
+        self.assertIn(("up", "left"), self.feed(None, 1))
+
+    def test_holding_the_palm_open_still_stops(self):
+        self.assertIn("stop", self.kinds(self.feed(_hand("11111", spread=True), 55)))
+
+
 class PalmVsFourTests(unittest.TestCase):
     """The user's report: the open-palm STOP kept firing the four-finger SCREENSHOT and vice versa."""
 
