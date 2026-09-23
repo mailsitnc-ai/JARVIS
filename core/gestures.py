@@ -93,7 +93,7 @@ class HandInterpreter:
     CLICK_FREEZE = 0.22                    # s the pointer holds still after a pinch (clean clicks)
     DOUBLE_CLICK = 0.45                    # s between pinches that counts as a double-click
     DEADZONE = 3.0                         # px: smaller pointer changes are ignored (no micro-jitter)
-    HOLD = {"point": 0.1, "two": 0.15, "three": 1.0, "four": 0.6, "palm": 0.8}
+    HOLD = {"point": 0.1, "two": 0.15, "three": 1.0, "four": 0.9, "palm": 1.3}
     COOLDOWN = 3.0
 
     def __init__(self, screen=(1440, 900), speed: float = 1.0, mode: str = "relative"):
@@ -102,6 +102,7 @@ class HandInterpreter:
         self.mode = "absolute" if str(mode).lower().startswith("abs") else "relative"
         self.gain = self.GAIN * speed
         self._anchor = None            # hand position when the current pointing gesture began
+        self._track_idx = 8            # index fingertip (knuckle while pinching)
         w, h = min(0.98, self.BOX_W / speed), min(0.98, self.BOX_H / speed)
         cx = min(max(self.BOX_CX, w / 2), 1 - w / 2)
         cy = min(max(self.BOX_CY, h / 2), 1 - h / 2)
@@ -110,6 +111,7 @@ class HandInterpreter:
         self.fx, self.fy = OneEuro(0.7, 2.5), OneEuro(0.7, 2.5)
         self._cand, self._cand_frames = None, 0
         self.hand_since = None
+        self.shape = None              # 3D landmarks for this frame, when MediaPipe provides them
         self.votes = collections.deque(maxlen=5)
         self.pose, self.pose_since = "none", 0.0
         self.pinch = None                  # None | "left" | "right"
@@ -120,10 +122,10 @@ class HandInterpreter:
         self.next_fire = 0.0
         self.label = ""
 
-    # -- geometry --
-    @staticmethod
-    def _d(p, a, b):
-        return math.dist(p[a], p[b])
+    # -- geometry (3D when MediaPipe gives it, else flat 2D) --
+    def _d(self, p, a, b):
+        shape = self.shape or p
+        return math.dist(shape[a], shape[b])
 
     def fingers(self, p):
         """(thumb, index, middle, ring, pinky) extended?"""
@@ -132,6 +134,11 @@ class HandInterpreter:
         palm = d(0, 9) or 1e-6
         thumb = d(4, 5) / palm > 0.55 and d(4, 0) > d(3, 0)
         return (thumb, *ext)
+
+    def spread(self, p) -> float:
+        """How far apart the fingertips are, relative to the palm - an open palm is splayed, the
+        four-finger screenshot sign is not."""
+        return self._d(p, 8, 20) / (self._d(p, 0, 9) or 1e-6)
 
     def _pinch_state(self, p):
         d = lambda a, b: self._d(p, a, b)  # noqa: E731
@@ -168,6 +175,8 @@ class HandInterpreter:
             return None
         return raw
 
+    SPREAD_PALM = 0.9      # index-to-pinky tip spread that says "open palm" rather than "four fingers"
+
     def classify(self, p) -> str:
         thumb, i, m, r, k = self.fingers(p)
         if i and not (m or r or k):
@@ -177,15 +186,25 @@ class HandInterpreter:
         if i and m and r and not k:
             return "three"
         if i and m and r and k:
-            return "palm" if thumb else "four"
+            # STOP (open palm) vs SCREENSHOT (four fingers): the palm is splayed with the thumb out;
+            # four fingers are held together with the thumb tucked. Both are needed, so a slightly
+            # open thumb can't stop hand control by mistake.
+            return "palm" if (thumb and self.spread(p) >= self.SPREAD_PALM) else "four"
         if not (i or m or r or k):
             return "fist"
         return "other"
 
     def _to_screen(self, p, t, pointing: bool):
-        """Where the pointer should be now. The tracked point is the index knuckle - it stays put while
-        you pinch, so clicking doesn't jog the pointer."""
-        nx, ny = self.fx(p[5][0], t), self.fy(p[5][1], t)
+        """Where the pointer should be now. Normally the INDEX TIP, so just waggling the finger moves the
+        pointer (no need to move the whole arm); while pinching it switches to the knuckle, which stays
+        put as the finger closes, so a click doesn't drag the pointer with it."""
+        idx = 5 if self.pinch else 8
+        if idx != self._track_idx:          # switch tracked point without the pointer jumping
+            self._track_idx = idx
+            self._anchor = None
+            self.fx.reset()
+            self.fy.reset()
+        nx, ny = self.fx(p[idx][0], t), self.fy(p[idx][1], t)
         if self.mode == "absolute":
             x0, y0, x1, y1 = self.BOX
             return (min(max((nx - x0) / (x1 - x0), 0.0), 1.0) * (self.sw - 1),
@@ -208,13 +227,18 @@ class HandInterpreter:
                 min(max(self.cursor[1] + dy * self.gain * accel, 0), self.sh - 1))
 
     # -- main step --
-    def update(self, p, t: float) -> list:
+    def update(self, p, t: float, world=None) -> list:
+        """p: 21 (x, y) points in the frame. world: the same points in 3D (metres), when available -
+        used for every finger/pinch measurement so a finger pointing at the camera still reads as
+        extended (flat 2D would see it as curled)."""
+        self.shape = world
         acts = []
         if p is None:                      # hand lost: never leave a button stuck down
             if self.pinch:
                 acts.append(("up", self.pinch))
             self.pinch, self.scroll_anchor, self.label = None, None, ""
             self._cand, self._cand_frames, self.hand_since, self._anchor = None, 0, None, None
+            self._track_idx = 8
             self.votes.clear()
             self.pose = "none"
             self.fx.reset()
@@ -306,14 +330,21 @@ class LandmarkTracker:
             return None
 
     def detect(self, frame_bgr, cv2):
-        """21 normalised (x, y) points for the hand in view, or None."""
+        """(2D points in the frame, 3D points in metres) for the hand in view, or (None, None).
+
+        The 3D ("world") points are what make a finger pointed AT the camera still read as extended -
+        flat 2D distances foreshorten to nothing and the hand looks like a fist."""
         import mediapipe as mp
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         result = self._lm.detect_for_video(image, int((time.monotonic() - self._t0) * 1000))
         if not result.hand_landmarks:
-            return None
-        return [(pt.x, pt.y) for pt in result.hand_landmarks[0]]
+            return None, None
+        pts = [(pt.x, pt.y) for pt in result.hand_landmarks[0]]
+        world = None
+        if getattr(result, "hand_world_landmarks", None):
+            world = [(pt.x, pt.y, pt.z) for pt in result.hand_world_landmarks[0]]
+        return pts, world
 
 
 def fingers_up(pts) -> int:
@@ -563,8 +594,8 @@ class GestureController:
                 time.sleep(0.01)
                 continue
             now = time.time()
-            pts = tracker.detect(frame, cv2)
-            acts = hand.update(pts, now)
+            pts, world = tracker.detect(frame, cv2)
+            acts = hand.update(pts, now, world)
             for act in acts:
                 self._perform(act, frame)
             diag.frame(now, pts is not None, hand.pose, acts)
@@ -587,7 +618,8 @@ class GestureController:
         for x, y in pts or ():
             cv2.circle(frame, (int(x * w), int(y * h)), 3, colour, -1)
         if pts:
-            cv2.circle(frame, (int(pts[5][0] * w), int(pts[5][1] * h)), 8, colour, 2)   # the pointer point
+            tip = pts[hand._track_idx]
+            cv2.circle(frame, (int(tip[0] * w), int(tip[1] * h)), 8, colour, 2)   # the tracked point
         cv2.putText(frame, hand.label or ("no hand" if not pts else hand.pose), (12, 34),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, colour, 2)
         cv2.putText(frame, "point=move (hand anywhere - drop it to re-centre)  pinch=click/drag  "
