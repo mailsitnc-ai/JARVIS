@@ -1,4 +1,5 @@
 """Hand-gesture control: privacy gating, finger counting, and skill start/stop dispatch."""
+import math
 import unittest
 
 from core.actions import ActionBroker, Blocked
@@ -116,12 +117,44 @@ class HandInterpreterTests(unittest.TestCase):
         self.assertEqual(c(_hand("11111")), "palm")
         self.assertEqual(c(_hand("00000")), "fist")
 
-    def test_point_moves_the_pointer_and_follows_the_hand(self):
-        acts = self.feed(_hand("01000"), 10)
-        moves = [a for a in acts if a[0] == "move"]
-        self.assertTrue(moves)
-        acts = self.feed(_hand("01000", dx=0.1), 30)
-        self.assertGreater([a for a in acts if a[0] == "move"][-1][1], moves[-1][1])  # hand right -> pointer right
+    def test_point_moves_the_pointer_the_way_the_hand_moves(self):
+        self.feed(_hand("01000"), 10)                      # settle, pointing
+        start = self.h.cursor
+        for i in range(1, 12):                             # slide the hand right and down
+            self.feed(_hand("01000", dx=0.01 * i, dy=0.005 * i), 1)
+        self.assertGreater(self.h.cursor[0], start[0])
+        self.assertGreater(self.h.cursor[1], start[1])
+
+    def test_a_resting_hand_does_not_drift(self):
+        self.feed(_hand("01000"), 10)
+        at = self.h.cursor
+        self.assertEqual(self.kinds(self.feed(_hand("01000"), 30)), [])   # held still: no movement at all
+        self.assertEqual(self.h.cursor, at)
+
+    def test_dropping_and_raising_the_hand_re_centres_instead_of_jumping(self):
+        """The point of trackpad mode: rest your arm, bring the hand back anywhere, carry on."""
+        self.feed(_hand("01000"), 10)
+        for i in range(1, 10):
+            self.feed(_hand("01000", dx=0.01 * i), 1)
+        moved_to = self.h.cursor
+        self.feed(None, 3)                                  # hand out of view (resting on the desk)
+        self.feed(_hand("01000", dx=-0.3, dy=0.25), 8)      # back, much lower and to the left
+        self.assertLess(math.dist(self.h.cursor, moved_to), 60)
+
+    def test_a_fast_flick_travels_further_than_the_same_slow_move(self):
+        from core.gestures import HandInterpreter
+        def travel(frames_per_step):
+            h, t = HandInterpreter((1000, 800)), 0.0
+            for f in range(10):
+                t += 1 / 30
+                h.update(_hand("01000"), t)
+            start = h.cursor
+            for i in range(1, 9):
+                for _ in range(frames_per_step):
+                    t += 1 / 30
+                    h.update(_hand("01000", dx=0.02 * i), t)
+            return abs(h.cursor[0] - start[0])
+        self.assertGreater(travel(1), travel(4) * 1.15)     # same distance, faster hand -> further
 
     def test_pinch_clicks_and_releases(self):
         self.feed(_hand("01000"), 10)
@@ -171,7 +204,21 @@ class HandInterpreterTests(unittest.TestCase):
     def test_pointer_speed_setting_scales_the_mapping(self):
         from core.gestures import HandInterpreter
         slow, fast = HandInterpreter((1000, 800), 0.7), HandInterpreter((1000, 800), 1.5)
-        self.assertGreater(slow.BOX[2] - slow.BOX[0], fast.BOX[2] - fast.BOX[0])
+        self.assertLess(slow.gain, fast.gain)
+        box_slow, box_fast = HandInterpreter((1000, 800), 0.7, "absolute"), HandInterpreter((1000, 800), 1.5, "absolute")
+        self.assertGreater(box_slow.BOX[2] - box_slow.BOX[0], box_fast.BOX[2] - box_fast.BOX[0])
+
+    def test_absolute_mode_still_maps_the_box(self):
+        from core.gestures import HandInterpreter
+        h, t = HandInterpreter((1000, 800), 1.0, "absolute"), 0.0
+        for _ in range(12):
+            t += 1 / 30
+            h.update(_hand("01000", dx=0.2), t)
+        left = h.cursor[0]
+        for _ in range(30):
+            t += 1 / 30
+            h.update(_hand("01000", dx=-0.2), t)
+        self.assertLess(h.cursor[0], left)
 
     def test_a_fist_never_clicks(self):
         acts = self.feed(_hand("00000", thumb_to="index"), 30)

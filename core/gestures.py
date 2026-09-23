@@ -80,9 +80,12 @@ class HandInterpreter:
       ("identify",) ("screenshot",) ("stop",)
     Screen coordinates come from `screen` (w, h)."""
 
-    # The part of the camera view mapped onto the whole screen at speed 1.0. A bigger box = a slower,
-    # more precise pointer (your hand travels further per screen). Tuned from a real session where a
-    # 0.6-wide box felt "too responsive". `speed` (config gestures.pointer_speed) scales it.
+    # Pointer mapping. "relative" (default) works like a trackpad: the pointer follows how your hand
+    # MOVES, from wherever it is, so you can rest your elbow on the desk and keep your hand low - no
+    # holding it up inside a box (that caused arm ache). Dropping your hand and raising it again just
+    # re-centres, like lifting a mouse. "absolute" is the old fixed-box mapping (gestures.pointer_mode).
+    GAIN = 2600.0          # screen px per full-frame hand movement, before acceleration
+    ACCEL = (0.55, 2.2)    # slow hand = fine control, fast flick = across the screen
     BOX_W, BOX_H, BOX_CX, BOX_CY = 0.76, 0.62, 0.5, 0.45
     PINCH_ON, PINCH_OFF = 0.26, 0.40       # thumb-tip distance / palm size, with hysteresis
     PINCH_FRAMES = 2                       # a pinch must hold this many frames (passing shapes don't click)
@@ -93,9 +96,12 @@ class HandInterpreter:
     HOLD = {"point": 0.1, "two": 0.15, "three": 1.0, "four": 0.6, "palm": 0.8}
     COOLDOWN = 3.0
 
-    def __init__(self, screen=(1440, 900), speed: float = 1.0):
+    def __init__(self, screen=(1440, 900), speed: float = 1.0, mode: str = "relative"):
         self.sw, self.sh = screen
         speed = min(max(float(speed or 1.0), 0.3), 3.0)
+        self.mode = "absolute" if str(mode).lower().startswith("abs") else "relative"
+        self.gain = self.GAIN * speed
+        self._anchor = None            # hand position when the current pointing gesture began
         w, h = min(0.98, self.BOX_W / speed), min(0.98, self.BOX_H / speed)
         cx = min(max(self.BOX_CX, w / 2), 1 - w / 2)
         cy = min(max(self.BOX_CY, h / 2), 1 - h / 2)
@@ -176,14 +182,30 @@ class HandInterpreter:
             return "fist"
         return "other"
 
-    def _to_screen(self, p, t):
-        x0, y0, x1, y1 = self.BOX
-        # the index knuckle: steady while pinching (the fingertip itself moves when you pinch)
-        nx = self.fx(p[5][0], t)
-        ny = self.fy(p[5][1], t)
-        sx = min(max((nx - x0) / (x1 - x0), 0.0), 1.0) * (self.sw - 1)
-        sy = min(max((ny - y0) / (y1 - y0), 0.0), 1.0) * (self.sh - 1)
-        return sx, sy
+    def _to_screen(self, p, t, pointing: bool):
+        """Where the pointer should be now. The tracked point is the index knuckle - it stays put while
+        you pinch, so clicking doesn't jog the pointer."""
+        nx, ny = self.fx(p[5][0], t), self.fy(p[5][1], t)
+        if self.mode == "absolute":
+            x0, y0, x1, y1 = self.BOX
+            return (min(max((nx - x0) / (x1 - x0), 0.0), 1.0) * (self.sw - 1),
+                    min(max((ny - y0) / (y1 - y0), 0.0), 1.0) * (self.sh - 1))
+        if not pointing:                      # hand resting/other gesture: remember where it is, don't move
+            self._anchor = (nx, ny, t)
+            return self.cursor
+        if self.cursor is None:
+            self.cursor = (self.sw / 2, self.sh / 2)
+        if self._anchor is None:
+            self._anchor = (nx, ny, t)
+            return self.cursor
+        ax, ay, at = self._anchor
+        dx, dy = nx - ax, ny - ay
+        dt = max(1e-3, t - at)
+        lo, hi = self.ACCEL
+        accel = min(hi, max(lo, lo + 2.5 * math.hypot(dx, dy) / dt))   # hand speed -> pointer gain
+        self._anchor = (nx, ny, t)
+        return (min(max(self.cursor[0] + dx * self.gain * accel, 0), self.sw - 1),
+                min(max(self.cursor[1] + dy * self.gain * accel, 0), self.sh - 1))
 
     # -- main step --
     def update(self, p, t: float) -> list:
@@ -192,7 +214,7 @@ class HandInterpreter:
             if self.pinch:
                 acts.append(("up", self.pinch))
             self.pinch, self.scroll_anchor, self.label = None, None, ""
-            self._cand, self._cand_frames, self.hand_since = None, 0, None
+            self._cand, self._cand_frames, self.hand_since, self._anchor = None, 0, None, None
             self.votes.clear()
             self.pose = "none"
             self.fx.reset()
@@ -211,7 +233,7 @@ class HandInterpreter:
                 self.scroll_anchor = None
         held = t - self.pose_since
         pointer = pose in ("point", "pinch") and (pose == "pinch" or held >= self.HOLD["point"])
-        sx, sy = self._to_screen(p, t)
+        sx, sy = self._to_screen(p, t, pointer) or (self.cursor or (self.sw / 2, self.sh / 2))
 
         # pinch edges -> button down/up
         if pinch != self.pinch:
@@ -528,11 +550,13 @@ class GestureController:
                              "4 = screenshot, open palm = stop.")
         try:
             from core.config import load_settings
-            speed = float(load_settings().get("gestures.pointer_speed", 1.0) or 1.0)
+            settings = load_settings()
+            speed = float(settings.get("gestures.pointer_speed", 1.0) or 1.0)
+            mode = str(settings.get("gestures.pointer_mode", "relative") or "relative")
         except Exception:
-            speed = 1.0
-        hand = HandInterpreter(oslayer.screen_size(), speed)
-        diag.line(f"pointer_speed={speed} box={tuple(round(v, 2) for v in hand.BOX)}")
+            speed, mode = 1.0, "relative"
+        hand = HandInterpreter(oslayer.screen_size(), speed, mode)
+        diag.line(f"pointer_speed={speed} mode={hand.mode} gain={hand.gain:.0f}")
         while not self._stop.is_set():
             frame = self._read(cap, cv2)
             if frame is None:
@@ -555,8 +579,9 @@ class GestureController:
 
     def _draw_landmarks(self, frame, cv2, hand, pts):
         h, w = frame.shape[:2]
-        x0, y0, x1, y1 = hand.BOX
-        cv2.rectangle(frame, (int(x0 * w), int(y0 * h)), (int(x1 * w), int(y1 * h)), (90, 90, 90), 1)
+        if hand.mode == "absolute":
+            x0, y0, x1, y1 = hand.BOX
+            cv2.rectangle(frame, (int(x0 * w), int(y0 * h)), (int(x1 * w), int(y1 * h)), (90, 90, 90), 1)
         colour = {"pointer": (0, 255, 0), "click / drag": (0, 140, 255), "right-click": (255, 0, 200)}.get(
             hand.label, (255, 200, 0) if hand.label.startswith("scroll") else (0, 200, 200))
         for x, y in pts or ():
@@ -565,8 +590,9 @@ class GestureController:
             cv2.circle(frame, (int(pts[5][0] * w), int(pts[5][1] * h)), 8, colour, 2)   # the pointer point
         cv2.putText(frame, hand.label or ("no hand" if not pts else hand.pose), (12, 34),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, colour, 2)
-        cv2.putText(frame, "point=move  pinch=click/drag  thumb+middle=right  2=scroll  3=identify  "
-                           "4=shot  palm=stop", (8, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1)
+        cv2.putText(frame, "point=move (hand anywhere - drop it to re-centre)  pinch=click/drag  "
+                           "fold index+thumb-middle=right  2=scroll  3=identify  4=shot  palm=stop",
+                    (8, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (220, 220, 220), 1)
 
     def _run_counts(self, cv2, cap, gui, diag):
         """Skin-colour fallback: count fingers in a box; 1/2 = scroll down/up, 3 identify, 4 screenshot."""
