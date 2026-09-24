@@ -5,7 +5,8 @@ forward and the preview goes behind it. So the point-to-type keyboard gets its o
 borderless, above every app and every desktop, click-through (it can never swallow a click), and
 non-activating, so showing it does NOT take focus away from whatever you are typing into.
 
-The keys are highlighted as your fingertip moves, so you watch the keyboard on screen, not the camera.
+The keys are highlighted as your fingertip moves, the swipe you're drawing is traced across them,
+and the words it could have been are offered above - so you watch the keyboard, not the camera.
 On Windows (and if pyobjc isn't there) this reports unavailable and the keyboard stays drawn inside
 the preview window.
 """
@@ -15,32 +16,49 @@ import sys
 
 MAC = sys.platform == "darwin"
 
-HINT = "point at a letter, rest on it to type   -   thumbs-up (or 'hide the keyboard') to close"
+# The panel shows the suggestion strip plus the four key rows, in the same proportions as the area
+# your fingertip is measured against (Keyboard.SUGGEST is half a key row) - otherwise pointing at a
+# suggestion would land somewhere else on screen than where it is drawn. A test keeps these in step.
+STRIP = 1 / 9
+HINT = "pinch and drag through the letters to swipe a word   -   or rest on a key to type it"
 LABELS = {"back": "delete", "enter": "enter", "space": "space", "done": "done"}
 
 
 def render(rows, highlight, width: int, height: int, progress: float = 0.0, word: str = "",
-           note: str = ""):
+           note: str = "", trail=(), suggestions=()):
     """The keyboard as a BGRA image: dark translucent panel, the key under your finger lit up with a
-    bar filling as it's about to type, and the word you're typing (plus any autocorrect) along the top."""
+    bar filling as it's about to type, the swipe you're drawing, and the word you're typing (or the
+    alternatives a swipe could have meant) along the top."""
     import cv2
     import numpy as np
 
     img = np.zeros((height, width, 4), dtype=np.uint8)
     pad = max(6, width // 90)
-    top = int(height * 0.15)                      # status strip above the keys
+    top = int(height * STRIP)                     # suggestions (or what you're typing) above the keys
     font = cv2.FONT_HERSHEY_SIMPLEX
     cv2.rectangle(img, (0, 0), (width - 1, height - 1), (28, 26, 24, 240), -1)
     cv2.rectangle(img, (0, 0), (width - 1, height - 1), (120, 200, 255, 255), 2)
-    left = f"{word}|" if word else HINT
-    cv2.putText(img, left, (pad + 4, int(top * 0.68)), font,
-                max(0.34, width / (1300 if word else 2200)),
-                (150, 245, 190, 255) if word else (170, 200, 220, 255), 2 if word else 1, cv2.LINE_AA)
-    if note:
-        scale = max(0.34, width / 2000)
-        (tw, _), _ = cv2.getTextSize(note, font, scale, 1)
-        cv2.putText(img, note, (width - tw - pad - 6, int(top * 0.68)), font, scale,
-                    (120, 200, 255, 255), 1, cv2.LINE_AA)
+    if suggestions:                   # what the swipe might have been - point at one to swap it in
+        n = len(suggestions)
+        cw = (width - 2 * pad) / n
+        for i, choice in enumerate(suggestions):
+            x, on = pad + i * cw, highlight == f"sug{i}"
+            cv2.rectangle(img, (int(x), 2), (int(x + cw - 4), top - 3),
+                          (90, 215, 120, 255) if on else (52, 50, 48, 255), -1)
+            scale = max(0.4, width / 1800)
+            (tw, th), _ = cv2.getTextSize(choice, font, scale, 2)
+            cv2.putText(img, choice, (int(x + (cw - tw) / 2), int((top + th) / 2)), font, scale,
+                        (20, 30, 20, 255) if on else (225, 225, 225, 255), 2, cv2.LINE_AA)
+    else:
+        left = f"{word}|" if word else HINT
+        cv2.putText(img, left, (pad + 4, int(top * 0.68)), font,
+                    max(0.34, width / (1300 if word else 2200)),
+                    (150, 245, 190, 255) if word else (170, 200, 220, 255), 2 if word else 1, cv2.LINE_AA)
+        if note:
+            scale = max(0.34, width / 2000)
+            (tw, _), _ = cv2.getTextSize(note, font, scale, 1)
+            cv2.putText(img, note, (width - tw - pad - 6, int(top * 0.68)), font, scale,
+                        (120, 200, 255, 255), 1, cv2.LINE_AA)
     rh = (height - top - pad) / max(1, len(rows))
     for r, keys in enumerate(rows):
         kw = (width - 2 * pad) / max(1, len(keys))
@@ -61,6 +79,14 @@ def render(rows, highlight, width: int, height: int, progress: float = 0.0, word
             (tw, th), _ = cv2.getTextSize(label, font, scale, 2)
             cv2.putText(img, label, (int(x + (kw - tw) / 2), int(y + (rh + th) / 2)), font, scale,
                         (20, 30, 20, 255) if on else (235, 235, 235, 255), 2, cv2.LINE_AA)
+    if len(trail) > 1:                # the swipe you're drawing, fading out behind your fingertip
+        keys_h = height - top - pad
+        line = [(int(pad + u * (width - 2 * pad)), int(top + v * keys_h)) for u, v in trail]
+        for i, (a, b) in enumerate(zip(line, line[1:])):
+            fade = 0.35 + 0.65 * (i + 1) / len(line)
+            cv2.line(img, a, b, (int(255 * fade), int(210 * fade), int(120 * fade), 255),
+                     max(2, int(height / 90)), cv2.LINE_AA)
+        cv2.circle(img, line[-1], max(4, int(height / 45)), (255, 255, 255, 255), -1)
     return img
 
 
@@ -132,9 +158,13 @@ class KeyboardOverlay:
             self.window = self.view = None
             return False
 
-    def update(self, rows, highlight, progress: float = 0.0, word: str = "", note: str = "") -> None:
-        """Redraw only when something visible changed - a few times a second, not thirty."""
-        state = (highlight, round(float(progress or 0.0) * 8), word, note)
+    def update(self, rows, highlight, progress: float = 0.0, word: str = "", note: str = "",
+               trail=(), suggestions=()) -> None:
+        """Redraw only when something visible changed - a few times a second, not thirty (while a
+        swipe is being drawn it does redraw every frame, so the trail follows your finger)."""
+        trail = tuple(trail or ())
+        state = (highlight, round(float(progress or 0.0) * 8), word, note, len(trail),
+                 trail[-1] if trail else None, tuple(suggestions or ()))
         if self.window is None or state == self._drawn:
             return
         self._drawn = state
@@ -143,7 +173,8 @@ class KeyboardOverlay:
             import cv2
 
             w, h = self.size
-            ok, buf = cv2.imencode(".png", render(rows, highlight, w, h, progress, word, note))
+            ok, buf = cv2.imencode(".png", render(rows, highlight, w, h, progress, word, note,
+                                                  trail, suggestions))
             if not ok:
                 return
             raw = buf.tobytes()

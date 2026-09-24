@@ -44,7 +44,37 @@ kind later leave listen literally maybe money mostly myself nearly obviously per
 possible practice prepare pretty probably problem promise quiet reach reason remember revise revision sample
 science second section seriously several simple since single sleepy slowly sometimes special specific subject
 submit suddenly suppose teacher teachers themselves therefore tired together tough travel trouble understand
-unless usually video watching weather whatever whether window without wonder worried writing yourself""".split()
+unless usually video watching weather whatever whether window without wonder worried writing yourself
+account app apps battery browser button camera charger charging click clicked computer data delete deleted
+device download downloaded email file files folder game games google headphones internet keyboard laptop link
+links login mail mobile mouse music netflix notification online password phone photos playlist printer
+profile screen screenshot scroll search server settings site software song songs speaker stream tab tabs
+type typed typing update upload uploaded username video videos website wifi window youtube zoom
+assignment attendance backlog biology bus canteen chemistry class deadline debate economics english essay
+exam geography grade history homework library maths notes period physics practical presentation principal
+project quiz report revision schedule science seminar submission syllabus teacher test timetable tuition
+uniform
+brother sister mother father parents family cousin uncle aunt grandma grandpa baby boy girl man woman
+people person child children friends neighbour
+food water milk tea coffee breakfast lunch dinner snack rice bread butter cheese chicken egg eggs fruit
+apple banana mango orange juice chocolate cake cream pizza burger sandwich sugar salt
+house room kitchen bathroom bedroom garden door window table chair bed sofa light clock floor wall
+city town village country india market shop store mall park street road station airport bus train car bike
+cycle taxi metro ticket hospital hotel restaurant temple church office
+clothes shirt shoes socks watch glasses umbrella wallet keys money rupees price expensive cheap
+head hand hands eyes ears nose mouth teeth hair face arm leg foot stomach heart brain
+rain sun cloud wind cold hot warm winter summer monsoon season afternoon evening
+birthday festival holiday holidays vacation party wedding
+happy sad angry tired sleepy hungry thirsty bored excited nervous scared safe sick
+went came gets gave took makes doing saw looked heard listened spoke talked told asked answered knew
+thought felt wanted needed liked loved tried kept brought bought sold paid found lost played walked ran
+slept ate drank wrote opened closed started stopped finished helped learned taught studied worked waited
+wore carried cleaned washed cooked drove caught held moved turned changed received called visited returned
+stayed lived grew built broke fixed shared chose decided remembered forgot understood explained believed
+hoped wished worried laughed cried smiled walking running playing eating drinking reading sleeping
+buy sell pay lose win play run walk sit stand eat drink read open close start finish learn teach rest wait
+wear carry clean wash cook drive ride catch throw hold move turn change receive call meet visit leave stay
+live grow build break share choose decide forget explain laugh cry smile""".split()
 
 # Chat shorthand: real spellings for us, even though no dictionary has them. Never "corrected".
 KEEP = set("""sry plz pls thx ty tysm idk idc lol lmao lmk brb btw omw nvm imo tbh irl asap np gm gn gg ttyl

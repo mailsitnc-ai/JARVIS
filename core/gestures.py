@@ -77,6 +77,24 @@ class OneEuro:
 
 # ---- landmarks -> actions (pure logic, no camera/OS, unit-tested) --------------------------------
 
+_VOCAB = None
+
+
+def vocabulary():
+    """Words swipe typing can produce - the everyday list plus the ones you've typed yourself."""
+    global _VOCAB
+    if _VOCAB is None:
+        from core import glide
+        store = None
+        try:
+            from core import oslayer
+            store = oslayer.user_data_dir() / "typed_words.json"
+        except Exception:
+            store = None
+        _VOCAB = glide.Vocabulary(store)
+    return _VOCAB
+
+
 class Keyboard:
     """A keyboard you type by POINTING at it (no pinching): the fingertip's position in the camera frame
     picks a key, and resting on it for a moment types it. Holding still repeats, so double letters
@@ -86,6 +104,8 @@ class Keyboard:
 
     ROWS = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
     EXTRA = ("space", "back", "enter", "done")
+    SUGGEST = 0.085                        # the strip of alternative words just above the keys
+    GLIDE_MIN = 1.2                        # key-widths a path must cover to be a swipe, not a tap
     AREA = (0.04, 0.30, 0.96, 0.98)        # where the keyboard sits in the camera frame
     DWELL = 0.30                           # s resting on a key before it types
     REPEAT = 0.70                          # s to repeat while you stay on the same key
@@ -106,10 +126,29 @@ class Keyboard:
         self.word = ""                     # the word being typed, for autocorrect
         self.speed = 0.0                   # how fast the fingertip is moving across the keys
         self._at = None                    # last (x, y, t)
+        self.path = []                     # the swipe being drawn, while the pinch is held
+        self.gliding = False
+        self.suggestions = []              # other words that swipe could have been
+        self.last_word = ""                # what the last swipe typed, so a suggestion can replace it
+
+    @classmethod
+    def centres(cls):
+        """The middle of every key - swipe typing measures your path against these."""
+        from core import glide
+        return glide.centres(cls.layout(), cls.AREA)
+
+    @classmethod
+    def key_width(cls):
+        from core import glide
+        return glide.key_size(cls.layout(), cls.AREA)[0]
 
     def cell(self, key):
         """(x0, y0, x1, y1) of a key in the frame - the box you have to be inside to pick it."""
         x0, y0, x1, y1 = self.AREA
+        if str(key).startswith("sug") and self.suggestions:
+            n = len(self.suggestions)
+            i = int(str(key)[3:])
+            return x0 + (x1 - x0) * i / n, y0 - self.SUGGEST, x0 + (x1 - x0) * (i + 1) / n, y0
         rows = self.layout()
         rh = (y1 - y0) / len(rows)
         for r, keys in enumerate(rows):
@@ -127,6 +166,54 @@ class Keyboard:
         kx0, ky0, kx1, ky1 = box
         ox, oy = (kx1 - kx0) * self.STICKY, (ky1 - ky0) * self.STICKY
         return kx0 - ox <= x <= kx1 + ox and ky0 - oy <= y <= ky1 + oy
+
+    def _glide(self, x: float, y: float, t: float):
+        """While the pinch is held we just collect the path - nothing is typed until you let go."""
+        if not self.gliding:
+            self.gliding, self.path, self.suggestions = True, [], []
+        if not self.path or math.dist(self.path[-1], (x, y)) > 0.004:
+            self.path.append((x, y))
+        self.key, self.key_since, self.typed_key = self.key_at(x, y), t, None
+        self.speed, self._at = 0.0, (x, y, t)
+        return None
+
+    def _accept(self, key, t):
+        """Book-keeping shared by every way a key gets typed."""
+        self.typed_key, self.last_typed = key, t
+        if not str(key).startswith("sug"):
+            self.suggestions = []      # you've moved on: the swipe's alternatives are stale
+        if key == "back":
+            self.word = self.word[:-1]
+        elif key not in self.EXTRA and not str(key).startswith("sug"):
+            self.word += key
+        return key
+
+    def _finish_glide(self, t):
+        """The pinch is released: a short path is a tap on one key, a longer one is a swiped word."""
+        path, self.path = self.path, []
+        if not path:
+            return None
+        span = max(math.dist(path[0], q) for q in path)
+        if span < self.GLIDE_MIN * self.key_width():     # barely moved: you tapped that key
+            key = self.key_at(*path[-1])
+            return self._accept(key, t) if key else None
+        from core import glide
+        words, _ = glide.decode(path, self.centres(), self.key_width(), vocabulary(),
+                                deep=glide.dictionary_words)
+        self.suggestions = words[:3]
+        if not words:
+            return None                    # nothing looked like a word - better than typing rubbish
+        self.word, self.last_word = "", words[0]
+        return words[0]
+
+    def pick(self, index: int):
+        """Swap the word a swipe just typed for one of the alternatives above the keys:
+        (letters to rub out, what to type instead)."""
+        if not self.last_word or not 0 <= index < len(self.suggestions):
+            return None
+        word = self.suggestions[index]
+        back, self.last_word = len(self.last_word) + 1, word
+        return back, word + " "
 
     def progress(self, t: float) -> float:
         """0 to 1: how close the key under your finger is to typing - drawn as a filling bar."""
@@ -146,11 +233,15 @@ class Keyboard:
         except Exception:
             return None
         fixed = correct(word)
+        vocabulary().learn(fixed or word)     # your own words, so swiping can find them next time
         return (len(word), fixed) if fixed and fixed != word else None
 
     def key_at(self, x: float, y: float):
         """Which key is at this point in the frame (None outside the keyboard)."""
         x0, y0, x1, y1 = self.AREA
+        if self.suggestions and x0 <= x <= x1 and y0 - self.SUGGEST <= y < y0:
+            n = len(self.suggestions)      # the alternatives a swipe offers, above the top row
+            return f"sug{min(n - 1, int((x - x0) / (x1 - x0) * n))}"
         if not (x0 <= x <= x1 and y0 <= y <= y1):
             return None
         rows = len(self.ROWS) + 1
@@ -162,8 +253,16 @@ class Keyboard:
         col = min(len(self.EXTRA) - 1, int((x - x0) / (x1 - x0) * len(self.EXTRA)))
         return self.EXTRA[col]
 
-    def update(self, x: float, y: float, t: float):
-        """Returns the key to send now (or None). Repeats while you stay on one key."""
+    def update(self, x: float, y: float, t: float, down: bool = False):
+        """The key (or whole swiped word) to send now, or None.
+
+        `down` is the pinch: hold it and drag to SWIPE a word the way a phone keyboard does;
+        without it, rest on a key and it types, repeating if you stay."""
+        if down:
+            return self._glide(x, y, t)
+        if self.gliding:                       # you let go: work out what the path spelled
+            self.gliding = False
+            return self._finish_glide(t)
         if self._at:
             dt = max(1e-3, t - self._at[2])
             moving = math.hypot(x - self._at[0], y - self._at[1]) / dt
@@ -182,16 +281,9 @@ class Keyboard:
         if self.typed_key is None:
             if t - self.key_since < self.DWELL:
                 return None
-            self.typed_key, self.last_typed = key, t
-        elif t - self.last_typed >= self.REPEAT:   # still resting on it: type it again
-            self.last_typed = t
-        else:
+        elif t - self.last_typed < self.REPEAT:    # still resting on it: type it again
             return None
-        if key == "back":
-            self.word = self.word[:-1]
-        elif key not in self.EXTRA:
-            self.word += key
-        return key
+        return self._accept(key, t)
 
 
 class HandInterpreter:
@@ -454,17 +546,28 @@ class HandInterpreter:
                 acts.append(("stop",))
                 return acts
             if pose in ("point", "pinch", "two"):
-                key = self.keyboard.update(p[8][0], p[8][1], t)
+                kb = self.keyboard
+                # Pinch and drag = swipe a whole word, the way you type on your phone.
+                key = kb.update(p[8][0], p[8][1], t, down=pinch == "left")
                 if key == "done":                 # "done" closes the keyboard, it isn't a key to press
                     self.keyboard = None
                     acts.append(("keyboard", False))
-                elif key:
+                elif isinstance(key, str) and key.startswith("sug"):
+                    chosen = kb.pick(int(key[3:]))    # you pointed at a different word: swap it in
+                    if chosen:
+                        acts.append(("fix", chosen[0], chosen[1]))
+                elif key in Keyboard.EXTRA:
                     if key in ("space", "enter"):     # word finished: fix it the way a phone would
-                        fix = self.keyboard.finish_word()
+                        fix = kb.finish_word()
                         if fix:
                             acts.append(("fix", fix[0], fix[1]))
-                    acts.append(("key", key) if key in Keyboard.EXTRA else ("type", key))
-                self.label = f"keyboard: {self.keyboard.key or '-'}" if self.keyboard else "keyboard off"
+                    acts.append(("key", key))
+                elif key and len(key) == 1:
+                    acts.append(("type", key))
+                elif key:
+                    acts.append(("type", key + " "))  # a swiped word arrives whole, with its space
+                self.label = ("swiping..." if kb.gliding else f"keyboard: {kb.key or '-'}") \
+                    if self.keyboard else "keyboard off"
             return acts
         # GRAB: open your palm, then close it - like picking something up. Moving the closed hand drags;
         # opening it again drops. (Holding the palm OPEN is still the stop gesture.)
@@ -755,9 +858,9 @@ class GestureController:
             from core.shortcuts import press
             self.emit("gesture", press(act[1]))
         elif kind == "keyboard":
-            self.emit("gesture", "Keyboard up on screen - point at a letter and rest on it for a moment. "
-                                 "Thumbs-up again (or point at 'done') to put it away." if act[1]
-                      else "Keyboard away.")
+            self.emit("gesture", "Keyboard up on screen. Pinch and drag through the letters to swipe a "
+                                 "word (like your phone), or rest on a key to type it. Thumbs-up again "
+                                 "to put it away." if act[1] else "Keyboard away.")
         elif kind == "stop":
             self._stop.set()
 
@@ -893,7 +996,11 @@ class GestureController:
             if floating and kb_shown:
                 kb = hand.keyboard
                 note = f"fixed: {self.fixed[0]}" if now - self.fixed[1] < 3.5 else ""
-                overlay.update(Keyboard.layout(), kb.key, kb.progress(now), kb.word, note)
+                kx0, ky0, kx1, ky1 = Keyboard.AREA
+                trail = [((px - kx0) / (kx1 - kx0), (py - ky0) / (ky1 - ky0))
+                         for px, py in kb.path[-80:]]          # the swipe, in keyboard coordinates
+                overlay.update(Keyboard.layout(), kb.key, kb.progress(now), kb.word, note,
+                               trail, kb.suggestions)
             for act in acts:
                 self._perform(act, frame)
             diag.frame(now, pts is not None, hand.pose, acts)
@@ -1050,7 +1157,7 @@ _ON_MSG = ("Hand control is ON - watch the webcam window.\n"
            "  fold your index + touch thumb to middle = right-click     two fingers = scroll\n"
            "  flick 3 fingers: left/right = previous/next tab, up = switch app, down = close tab\n"
            "  flick 4 fingers left/right = desktops;  hold 3 = identify;  hold 4 = screenshot\n"
-           "  thumbs-up = the on-screen keyboard pops up (point at a letter, rest on it to type)\n"
+           "  thumbs-up = the on-screen keyboard pops up: pinch+drag to swipe words, or rest on a key\n"
            "  hold an open palm = stop (or say 'stop watching my hands').")
 
 

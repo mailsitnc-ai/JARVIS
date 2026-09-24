@@ -598,6 +598,90 @@ class KeyboardModeTests(unittest.TestCase):
         self.assertNotIn("key", [a[0] for a in acts])     # "done" isn't a key to press
 
 
+class SwipeTypingTests(unittest.TestCase):
+    """Pinch and drag through the letters - the way the user types on their phone."""
+
+    def setUp(self):
+        from core.gestures import HandInterpreter, Keyboard
+        self.h = HandInterpreter((1000, 800))
+        self.h.set_keyboard(True)
+        self.points = Keyboard.centres()
+        self.t = 0.0
+
+    def hand_at(self, x, y, pinched):
+        """The whole hand moved so the index tip sits on (x, y), pinched or open."""
+        thumb = "index" if pinched else None
+        base = _hand("01000", thumb_to=thumb)
+        return _hand("01000", thumb_to=thumb, dx=x - base[8][0], dy=y - base[8][1])
+
+    def feed(self, pts, frames=1, dt=1 / 30):
+        acts = []
+        for _ in range(frames):
+            self.t += dt
+            acts += self.h.update(pts, self.t)
+        return acts
+
+    def swipe(self, word, steps=6):
+        """Settle, pinch on the first letter, drag through the rest, let go."""
+        keys = [self.points[c] for c in word]
+        self.feed(self.hand_at(*keys[0], False), 10)          # hand arrives and settles
+        acts = self.feed(self.hand_at(*keys[0], True), 4)     # pinch down
+        for a, b in zip(keys, keys[1:]):
+            for i in range(1, steps + 1):
+                acts += self.feed(self.hand_at(a[0] + (b[0] - a[0]) * i / steps,
+                                               a[1] + (b[1] - a[1]) * i / steps, True))
+        return acts + self.feed(self.hand_at(*keys[-1], False), 3)   # let go
+
+    def typed(self, acts):
+        return [a[1] for a in acts if a[0] == "type"]
+
+    def test_swiping_through_the_letters_types_the_word(self):
+        self.assertEqual(self.typed(self.swipe("hello")), ["hello "])
+
+    def test_nothing_is_typed_until_you_let_go(self):
+        keys = [self.points[c] for c in "hello"]
+        self.feed(self.hand_at(*keys[0], False), 10)
+        acts = self.feed(self.hand_at(*keys[0], True), 4)
+        for a, b in zip(keys, keys[1:]):
+            for i in range(1, 7):
+                acts += self.feed(self.hand_at(a[0] + (b[0] - a[0]) * i / 6,
+                                               a[1] + (b[1] - a[1]) * i / 6, True))
+        self.assertEqual(self.typed(acts), [])                 # still mid-swipe
+        self.assertTrue(self.h.keyboard.gliding)
+        self.assertGreater(len(self.h.keyboard.path), 5)       # the trail being drawn
+
+    def test_the_alternatives_are_offered_after_a_swipe(self):
+        self.swipe("there")
+        self.assertIn("there", self.h.keyboard.suggestions)
+        self.assertGreater(len(self.h.keyboard.suggestions), 1)
+
+    def test_pointing_at_a_suggestion_swaps_the_word(self):
+        self.swipe("there")
+        kb = self.h.keyboard
+        kb.suggestions = ["there", "three", "these"]           # as drawn above the keys
+        kb.last_word = "there"
+        x0, y0, x1, y1 = kb.AREA
+        x = x0 + (x1 - x0) * (1.5 / 3)                         # the middle suggestion
+        acts = self.feed(self.hand_at(x, y0 - kb.SUGGEST / 2, False), 20)
+        self.assertIn(("fix", len("there") + 1, "three "), acts)
+
+    def test_a_pinch_that_does_not_move_taps_a_single_key(self):
+        x, y = self.points["g"]
+        self.feed(self.hand_at(x, y, False), 10)
+        acts = self.feed(self.hand_at(x, y, True), 5) + self.feed(self.hand_at(x, y, False), 3)
+        self.assertEqual(self.typed(acts), ["g"])
+
+    def test_a_scribble_types_nothing(self):
+        import random
+        rng = random.Random(4)
+        self.feed(self.hand_at(0.5, 0.6, False), 10)
+        acts = self.feed(self.hand_at(0.5, 0.6, True), 4)
+        for _ in range(25):
+            acts += self.feed(self.hand_at(0.15 + rng.random() * 0.7, 0.35 + rng.random() * 0.6, True))
+        acts += self.feed(self.hand_at(0.5, 0.6, False), 3)
+        self.assertEqual(self.typed(acts), [])
+
+
 class PalmVsFourTests(unittest.TestCase):
     """The user's report: the open-palm STOP kept firing the four-finger SCREENSHOT and vice versa."""
 

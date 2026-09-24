@@ -2,7 +2,8 @@
 
 Starts the gesture engine (core/gestures.py): point to move the mouse pointer, pinch thumb+index to click
 (twice = double-click, hold = drag), thumb+middle = right-click, two fingers = scroll, 3 = identify,
-4 = screenshot, open palm = stop. Privacy-gated on the 'camera' capability, so it only runs from an
+4 = screenshot, open palm = stop, thumbs-up = the on-screen keyboard (pinch and drag through the letters
+to swipe a word, like a phone). Privacy-gated on the 'camera' capability, so it only runs from an
 explicit command you approve.
 """
 import re
