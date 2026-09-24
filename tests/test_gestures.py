@@ -314,8 +314,16 @@ class GrabTests(unittest.TestCase):
 
     def test_closing_long_after_opening_is_not_a_grab(self):
         self.feed(_hand("11111", spread=True), 8)
-        self.feed(_hand("01000"), 45)                  # 1.5s of something else in between
+        self.feed(_hand("00000"), 70)                  # >2s of nothing: the moment has passed
+        self.feed(_hand("11111", spread=True), 2)      # (re-open so palm_at is fresh...)
+        self.feed(_hand("01000"), 20)                  # ...but pointing in between cancels the grab
         self.assertNotIn("down", self.kinds(self.feed(_hand("00000"), 5)))
+
+    def test_a_relaxed_fist_after_pointing_does_not_grab(self):
+        """Resting the hand closed after using the pointer must not pick anything up."""
+        self.feed(_hand("11111", spread=True), 5)
+        self.feed(_hand("01000"), 30)
+        self.assertNotIn("down", self.kinds(self.feed(_hand("00000"), 30)))
 
     def test_losing_the_hand_drops_what_it_was_holding(self):
         self.open_then_close()
@@ -323,6 +331,147 @@ class GrabTests(unittest.TestCase):
 
     def test_holding_the_palm_open_still_stops(self):
         self.assertIn("stop", self.kinds(self.feed(_hand("11111", spread=True), 55)))
+
+
+class SwipeTests(unittest.TestCase):
+    """Flick 3 fingers for tabs / app switch, 4 fingers for desktops."""
+
+    def setUp(self):
+        from core.gestures import HandInterpreter
+        self.h = HandInterpreter((1000, 800))
+        self.t = 0.0
+
+    def flick(self, fingers, dx=0.0, dy=0.0, frames=6, settle=6):
+        acts = []
+        for _ in range(settle):                       # hold the pose still first
+            self.t += 1 / 30
+            acts += self.h.update(_hand(fingers), self.t)
+        for i in range(1, frames + 1):                # then move the hand
+            self.t += 1 / 30
+            acts += self.h.update(_hand(fingers, dx=dx * i / frames, dy=dy * i / frames), self.t)
+        return [a for a in acts if a[0] == "shortcut"]
+
+    def test_three_finger_swipes(self):
+        self.assertEqual(self.flick("01110", dx=0.2), [("shortcut", "next_tab")])
+        self.t += 2
+        self.assertEqual(self.flick("01110", dx=-0.2), [("shortcut", "prev_tab")])
+        self.t += 2
+        self.assertEqual(self.flick("01110", dy=-0.2), [("shortcut", "switch_app")])
+        self.t += 2
+        self.assertEqual(self.flick("01110", dy=0.2), [("shortcut", "close_tab")])
+
+    def test_four_finger_swipes_change_desktop(self):
+        self.assertEqual(self.flick("01111", dx=0.2), [("shortcut", "next_desktop")])
+        self.t += 2
+        self.assertEqual(self.flick("01111", dx=-0.2), [("shortcut", "prev_desktop")])
+
+    def test_a_still_hand_does_not_swipe(self):
+        self.assertEqual(self.flick("01110", dx=0.0, frames=20), [])
+
+    def test_a_slow_drift_is_not_a_swipe(self):
+        acts = []
+        for i in range(1, 40):                        # 0.2 across more than a second
+            self.t += 1 / 30
+            acts += self.h.update(_hand("01110", dx=0.005 * i), self.t)
+        self.assertEqual([a for a in acts if a[0] == "shortcut"], [])
+
+    def test_a_swipe_fires_once_not_repeatedly(self):
+        self.assertEqual(len(self.flick("01110", dx=0.3, frames=15)), 1)
+
+    def test_swiping_four_fingers_does_not_also_screenshot(self):
+        acts = self.flick("01111", dx=0.25, frames=20, settle=10)
+        self.assertEqual(acts, [("shortcut", "next_desktop")])
+
+
+class KeyboardTests(unittest.TestCase):
+    """Point-to-type: the fingertip picks a key, resting on it types it."""
+
+    def setUp(self):
+        from core.gestures import Keyboard
+        self.kb = Keyboard()
+        self.t = 0.0
+
+    def point_at(self, key, seconds=0.5, step=1 / 30):
+        """Point at the middle of a key for a while; returns what got typed."""
+        out = []
+        x, y = self.centre(key)
+        for _ in range(int(seconds / step)):
+            self.t += step
+            k = self.kb.update(x, y, self.t)
+            if k:
+                out.append(k)
+        return out
+
+    def centre(self, key):
+        from core.gestures import Keyboard
+        x0, y0, x1, y1 = Keyboard.AREA
+        rows = list(Keyboard.ROWS) + [None]
+        for r, letters in enumerate(rows):
+            keys = list(letters) if letters else list(Keyboard.EXTRA)
+            if key in keys:
+                c = keys.index(key)
+                kw, rh = (x1 - x0) / len(keys), (y1 - y0) / len(rows)
+                return x0 + kw * (c + 0.5), y0 + rh * (r + 0.5)
+        raise AssertionError(key)
+
+    def test_pointing_at_a_key_types_it_after_a_moment(self):
+        self.assertEqual(self.point_at("t", 0.2), [])        # too quick
+        self.assertEqual(self.point_at("t", 0.3)[:1], ["t"])
+
+    def test_spelling_a_word_quickly(self):
+        typed = []
+        for letter in "thre":
+            typed += self.point_at(letter, 0.45)
+        self.assertEqual(typed, list("thre"))
+
+    def test_a_double_letter_repeats_without_moving_away(self):
+        """'three' ends in a double e - resting on the key types it again."""
+        typed = self.point_at("e", 1.1)
+        self.assertEqual(typed, ["e", "e"])
+
+    def test_space_backspace_enter_and_done(self):
+        for key in ("space", "back", "enter", "done"):
+            self.assertEqual(self.point_at(key, 0.45)[:1], [key])
+
+    def test_pointing_outside_the_keyboard_types_nothing(self):
+        self.assertEqual([self.kb.update(0.5, 0.05, i / 30) for i in range(30)], [None] * 30)
+
+
+class KeyboardModeTests(unittest.TestCase):
+    """Thumb + little finger shows and hides the keyboard; while it's up, pointing types."""
+
+    def setUp(self):
+        from core.gestures import HandInterpreter
+        self.h = HandInterpreter((1000, 800))
+        self.t = 0.0
+
+    def feed(self, pts, frames=1):
+        acts = []
+        for _ in range(frames):
+            self.t += 1 / 30
+            acts += self.h.update(pts, self.t)
+        return acts
+
+    def test_shaka_toggles_the_keyboard(self):
+        acts = self.feed(_hand("10001"), 30)
+        self.assertIn(("keyboard", True), acts)
+        self.assertIsNotNone(self.h.keyboard)
+        self.t += 2
+        self.assertIn(("keyboard", False), self.feed(_hand("10001"), 30))
+        self.assertIsNone(self.h.keyboard)
+
+    def test_pointing_types_instead_of_moving_the_pointer(self):
+        from core.gestures import Keyboard
+        self.feed(_hand("10001"), 30)                      # keyboard up
+        x0, y0, x1, y1 = Keyboard.AREA
+        rows = len(Keyboard.ROWS) + 1
+        kx = x0 + (x1 - x0) * (0.5 / 10)                   # 'q' - first key of the top row
+        ky = y0 + (y1 - y0) * (0.5 / rows)
+        pts = _hand("01000")
+        pts[8] = (kx, ky)
+        acts = self.feed(pts, 20)
+        self.assertIn(("type", "q"), acts)
+        self.assertNotIn("move", [a[0] for a in acts])
 
 
 class PalmVsFourTests(unittest.TestCase):

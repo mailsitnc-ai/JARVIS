@@ -297,6 +297,88 @@ def scroll_pixels(pixels: int, up: bool) -> None:
         scroll(100, up)
 
 
+# ---- keyboard (shortcuts, typing) ---------------------------------------------------------------
+
+# macOS virtual key codes for the keys we send.
+_MAC_VK = {"a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9, "b": 11,
+           "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21,
+           "6": 22, "5": 23, "=": 24, "9": 25, "7": 26, "-": 27, "8": 28, "0": 29, "]": 30, "o": 31,
+           "u": 32, "[": 33, "i": 34, "p": 35, "return": 36, "enter": 36, "l": 37, "j": 38, "'": 39,
+           "k": 40, ";": 41, "\\": 42, ",": 43, "/": 44, "n": 45, "m": 46, ".": 47, "tab": 48,
+           "space": 49, "`": 50, "backspace": 51, "delete": 51, "escape": 53, "esc": 53,
+           "left": 123, "right": 124, "down": 125, "up": 126, "f1": 122, "f2": 120, "f3": 99, "f4": 118}
+_MAC_FLAG = {"cmd": 1 << 20, "shift": 1 << 17, "alt": 1 << 19, "ctrl": 1 << 18, "fn": 1 << 23}
+# Windows virtual key codes.
+_WIN_VK = {"tab": 0x09, "return": 0x0D, "enter": 0x0D, "space": 0x20, "backspace": 0x08, "delete": 0x2E,
+           "escape": 0x1B, "esc": 0x1B, "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28,
+           "cmd": 0x5B, "ctrl": 0x11, "shift": 0x10, "alt": 0x12}
+
+
+def key_press(key: str, modifiers=()) -> bool:
+    """Press a key with modifiers, e.g. key_press('t', ['cmd']). Best-effort; macOS needs Accessibility."""
+    key = str(key).lower()
+    mods = [str(m).lower() for m in modifiers]
+    try:
+        if IS_MAC:
+            import Quartz
+            code = _MAC_VK.get(key)
+            if code is None:
+                return False
+            flags = 0
+            for m in mods:
+                flags |= _MAC_FLAG.get(m, 0)
+            for down in (True, False):
+                ev = Quartz.CGEventCreateKeyboardEvent(None, code, down)
+                Quartz.CGEventSetFlags(ev, flags)
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+                time.sleep(0.005)
+            return True
+        if IS_WINDOWS:
+            import ctypes
+            u = ctypes.windll.user32
+            codes = [_WIN_VK.get(m, 0) for m in mods]
+            main = _WIN_VK.get(key) or (ord(key.upper()) if len(key) == 1 else None)
+            if not main:
+                return False
+            for c in codes:
+                u.keybd_event(c, 0, 0, 0)
+            u.keybd_event(main, 0, 0, 0)
+            u.keybd_event(main, 0, 2, 0)
+            for c in reversed(codes):
+                u.keybd_event(c, 0, 2, 0)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def type_text(text: str) -> bool:
+    """Type text into whatever app is focused (as if you typed it)."""
+    text = str(text)
+    if not text:
+        return True
+    try:
+        if IS_MAC:
+            import Quartz
+            for chunk in (text[i:i + 20] for i in range(0, len(text), 20)):
+                for down in (True, False):
+                    ev = Quartz.CGEventCreateKeyboardEvent(None, 0, down)
+                    Quartz.CGEventKeyboardSetUnicodeString(ev, len(chunk), chunk)
+                    Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+                    time.sleep(0.004)
+            return True
+        if IS_WINDOWS:
+            import ctypes
+            u = ctypes.windll.user32
+            for ch in text:                       # KEYEVENTF_UNICODE
+                u.keybd_event(0, 0, 0x4, ord(ch))
+                u.keybd_event(0, 0, 0x4 | 0x2, ord(ch))
+            return True
+    except Exception:
+        pass
+    return False
+
+
 # ---- clipboard ---------------------------------------------------------------------------------
 
 def clipboard_get() -> str:

@@ -74,6 +74,56 @@ class OneEuro:
 
 # ---- landmarks -> actions (pure logic, no camera/OS, unit-tested) --------------------------------
 
+class Keyboard:
+    """A keyboard you type by POINTING at it (no pinching): the fingertip's position in the camera frame
+    picks a key, and resting on it for a moment types it. Holding still repeats, so double letters
+    ("three") work without moving away. The layout is drawn in the preview window, so nothing steals
+    focus from the app you're typing into."""
+
+    ROWS = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
+    EXTRA = ("space", "back", "enter", "done")
+    AREA = (0.06, 0.32, 0.94, 0.96)        # where the keyboard sits in the camera frame
+    DWELL = 0.28                           # s pointing at a key before it types
+    REPEAT = 0.65                          # s to repeat while you stay on the same key
+
+    def __init__(self):
+        self.key = None                    # key under the fingertip
+        self.key_since = 0.0
+        self.last_typed = 0.0
+        self.typed_key = None
+
+    def key_at(self, x: float, y: float):
+        """Which key is at this point in the frame (None outside the keyboard)."""
+        x0, y0, x1, y1 = self.AREA
+        if not (x0 <= x <= x1 and y0 <= y <= y1):
+            return None
+        rows = len(self.ROWS) + 1
+        row = min(rows - 1, int((y - y0) / (y1 - y0) * rows))
+        if row < len(self.ROWS):
+            letters = self.ROWS[row]
+            col = min(len(letters) - 1, int((x - x0) / (x1 - x0) * len(letters)))
+            return letters[col]
+        col = min(len(self.EXTRA) - 1, int((x - x0) / (x1 - x0) * len(self.EXTRA)))
+        return self.EXTRA[col]
+
+    def update(self, x: float, y: float, t: float):
+        """Returns the key to send now (or None). Repeats while you stay on one key."""
+        key = self.key_at(x, y)
+        if key != self.key:
+            self.key, self.key_since, self.typed_key = key, t, None
+        if key is None:
+            return None
+        if self.typed_key is None:
+            if t - self.key_since >= self.DWELL:
+                self.typed_key, self.last_typed = key, t
+                return key
+            return None
+        if t - self.last_typed >= self.REPEAT:      # still resting on it: type it again
+            self.last_typed = t
+            return key
+        return None
+
+
 class HandInterpreter:
     """Turns a stream of 21-point hand landmarks (normalised, mirrored like a mirror) into mouse actions:
       ("move", x, y) ("down", button, clicks) ("up", button) ("drag", x, y) ("scroll", px, up)
@@ -95,6 +145,13 @@ class HandInterpreter:
     DEADZONE = 3.0                         # px: smaller pointer changes are ignored (no micro-jitter)
     HOLD = {"point": 0.1, "two": 0.15, "three": 1.0, "four": 0.9, "palm": 1.3}
     COOLDOWN = 3.0
+    SWIPE_MIN = 0.10       # how far the hand must travel (fraction of the frame) to count as a swipe
+    SWIPE_TIME = 0.6       # ...and how quickly
+    SWIPE_COOLDOWN = 0.8
+    SWIPES = {             # pose -> {direction: shortcut}
+        "three": {"left": "prev_tab", "right": "next_tab", "up": "switch_app", "down": "close_tab"},
+        "four": {"left": "prev_desktop", "right": "next_desktop"},
+    }
 
     def __init__(self, screen=(1440, 900), speed: float = 1.0, mode: str = "relative"):
         self.sw, self.sh = screen
@@ -104,6 +161,11 @@ class HandInterpreter:
         self._anchor = None            # hand position when the current pointing gesture began
         self._track_idx = 8            # index fingertip (knuckle while pinching, palm centre while grabbing)
         self.grab = False              # open palm then close = grab and drag, open again to let go
+        self.keyboard = None           # a Keyboard while point-to-type mode is on
+        self.kb_toggled = -1e9
+        self.swipe_from = None         # (x, y, t) where the current 3/4-finger gesture started
+        self.swipe_done = False        # a swipe already fired for this gesture
+        self.next_swipe = 0.0
         self.grab_ended = -1e9
         self.palm_at = -1e9            # "no palm seen yet" - a fist at startup must not count as a grab
         w, h = min(0.98, self.BOX_W / speed), min(0.98, self.BOX_H / speed)
@@ -163,6 +225,34 @@ class HandInterpreter:
             return "left"
         return None
 
+    def _swipe(self, p, pose, t, acts) -> bool:
+        """Flick the hand while holding 3 or 4 fingers: 3 = tabs (left/right), switch app (up), close
+        tab (down); 4 = desktops. Returns True when a swipe fired (so the hold gesture is skipped)."""
+        x, y = p[9]                               # palm centre: steadier than a fingertip
+        if self.swipe_from is None or self.swipe_from[3] != pose:
+            self.swipe_from = (x, y, t, pose)
+            self.swipe_done = False
+            return False
+        x0, y0, t0, _ = self.swipe_from
+        if t - t0 > self.SWIPE_TIME:              # too slow to be a flick - start measuring again
+            self.swipe_from = (x, y, t, pose)
+            self.swipe_done = False               # ...and a fresh flick may fire (swipe, settle, swipe)
+            return False
+        if self.swipe_done or t < self.next_swipe:
+            return self.swipe_done
+        dx, dy = x - x0, y - y0
+        if max(abs(dx), abs(dy)) < self.SWIPE_MIN:
+            return False
+        direction = ("right" if dx > 0 else "left") if abs(dx) > abs(dy) else ("down" if dy > 0 else "up")
+        shortcut = self.SWIPES[pose].get(direction)
+        if not shortcut:
+            return False
+        acts.append(("shortcut", shortcut))
+        self.label = shortcut.replace("_", " ")
+        self.swipe_done = True
+        self.next_swipe = t + self.SWIPE_COOLDOWN
+        return True
+
     def _debounced_pinch(self, raw, t):
         """An engaged pinch stays until released. A NEW one must hold PINCH_FRAMES frames, the hand must
         have settled, and a left click must come from pointing - so opening a fist, or a thumb drifting
@@ -178,12 +268,15 @@ class HandInterpreter:
             return None
         return raw
 
+    KB_HOLD = 0.6          # s to hold the thumb+pinky "call me" sign to show/hide the keyboard
     SPREAD_PALM = 0.9      # index-to-pinky tip spread that says "open palm" rather than "four fingers"
-    GRAB_WINDOW = 1.2      # s: closing the hand this soon after opening it is a GRAB, not a stop
+    GRAB_WINDOW = 1.6      # s: closing the hand this soon after opening it is a GRAB, not a stop
     GRAB_GRACE = 1.5       # s after letting go before an open palm can stop hand control again
 
     def classify(self, p) -> str:
         thumb, i, m, r, k = self.fingers(p)
+        if thumb and k and not (i or m or r):
+            return "shaka"                   # thumb + little finger: show/hide the keyboard
         if i and not (m or r or k):
             return "point"
         if i and m and not (r or k):
@@ -263,19 +356,46 @@ class HandInterpreter:
             self.pose, self.pose_since = pose, t
             if pose != "two":
                 self.scroll_anchor = None
+            if pose not in self.SWIPES:
+                self.swipe_from, self.swipe_done = None, False
         held = t - self.pose_since
+        # Keyboard on/off: thumb + little finger held for a moment.
+        if pose == "shaka" and held >= self.KB_HOLD and t - self.kb_toggled > 1.5:
+            self.kb_toggled = t
+            self.keyboard = None if self.keyboard else Keyboard()
+            self.label = "keyboard on - point at the letters" if self.keyboard else "keyboard off"
+            acts.append(("keyboard", bool(self.keyboard)))
+            return acts
+        # While the keyboard is up, pointing types instead of moving the pointer.
+        if self.keyboard is not None:
+            if pose == "palm" and held >= self.HOLD["palm"]:
+                acts.append(("stop",))
+                return acts
+            if pose in ("point", "pinch", "two"):
+                key = self.keyboard.update(p[8][0], p[8][1], t)
+                if key:
+                    acts.append(("key", key) if key in Keyboard.EXTRA else ("type", key))
+                    if key == "done":
+                        self.keyboard = None
+                        acts.append(("keyboard", False))
+                self.label = f"keyboard: {self.keyboard.key or '-'}" if self.keyboard else "keyboard off"
+            return acts
         # GRAB: open your palm, then close it - like picking something up. Moving the closed hand drags;
         # opening it again drops. (Holding the palm OPEN is still the stop gesture.)
-        if pose == "palm":
-            self.palm_at = t
-        if not self.grab and pose == "fist" and 0 < t - self.palm_at <= self.GRAB_WINDOW:
+        raw_pose = self.votes[-1] if self.votes else "none"
+        if pose in ("palm", "four") or raw_pose in ("palm", "four"):
+            self.palm_at = t                    # an open hand, splayed or not - both count as "opened"
+        elif pose in ("point", "two", "three", "pinch"):
+            self.palm_at = -1e9                 # you did something else in between: no longer a grab
+        closed = pose == "fist" or (raw_pose == "fist" and pose in ("other", "fist"))
+        if not self.grab and closed and 0 < t - self.palm_at <= self.GRAB_WINDOW:
             self.grab = True
             if self.pinch:                      # never hold two buttons at once
                 acts.append(("up", self.pinch))
                 self.pinch = None
             acts.append(("down", "left", 1))
             self.label = "grab"
-        elif self.grab and pose != "fist":
+        elif self.grab and not closed and pose in ("palm", "four", "point", "two", "three"):
             self.grab = False
             self.grab_ended = t
             acts.append(("up", "left"))
@@ -319,6 +439,8 @@ class HandInterpreter:
                 self.label = "scroll up" if off < 0 else "scroll down"
             else:
                 self.label = "scroll (move hand up/down)"
+        elif pose in self.SWIPES and self._swipe(p, pose, t, acts):
+            pass                                  # a flick fired a shortcut; don't also fire the one-shot
         elif pose == "palm" and t - self.grab_ended < self.GRAB_GRACE:
             self.label = "let go"            # the open hand that ended a grab must not stop hand control
         elif pose in ("three", "four", "palm") and held >= self.HOLD[pose] and t >= self.next_fire:
@@ -512,6 +634,17 @@ class GestureController:
             self._fire_async(self._identify, frame.copy())
         elif kind == "screenshot":
             self._fire_async(self.runner, "take a screenshot")
+        elif kind == "type":
+            oslayer.type_text(act[1])
+        elif kind == "key":
+            oslayer.key_press({"back": "backspace", "enter": "return", "space": "space"}.get(act[1], act[1]))
+        elif kind == "shortcut":
+            from core.shortcuts import press
+            self.emit("gesture", press(act[1]))
+        elif kind == "keyboard":
+            self.emit("gesture", "Keyboard up - point at a letter and rest on it for a moment. Thumb + "
+                                 "little finger again (or 'done') to put it away." if act[1]
+                      else "Keyboard away.")
         elif kind == "stop":
             self._stop.set()
 
@@ -649,12 +782,35 @@ class GestureController:
         if pts:
             tip = pts[hand._track_idx]
             cv2.circle(frame, (int(tip[0] * w), int(tip[1] * h)), 8, colour, 2)   # the tracked point
+        if hand.keyboard is not None:
+            self._draw_keyboard(frame, cv2, hand.keyboard)
         cv2.putText(frame, hand.label or ("no hand" if not pts else hand.pose), (12, 34),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, colour, 2)
         cv2.putText(frame, "point=move (hand anywhere - drop it to re-centre)  pinch=click/drag  "
                            "open-then-close=grab  fold index+thumb-middle=right  2=scroll  3=identify  "
                            "4=shot  hold palm=stop",
                     (8, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (220, 220, 220), 1)
+
+    @staticmethod
+    def _draw_keyboard(frame, cv2, kb):
+        h, w = frame.shape[:2]
+        x0, y0, x1, y1 = (int(v * n) for v, n in zip(Keyboard.AREA, (w, h, w, h)))
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x0, y0), (x1, y1), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+        rows = list(Keyboard.ROWS) + [None]
+        rh = (y1 - y0) / len(rows)
+        for r, letters in enumerate(rows):
+            keys = list(letters) if letters else list(Keyboard.EXTRA)
+            kw = (x1 - x0) / len(keys)
+            for c, key in enumerate(keys):
+                kx, ky = int(x0 + c * kw), int(y0 + r * rh)
+                on = (kb.key == key)
+                cv2.rectangle(frame, (kx + 2, ky + 2), (int(kx + kw) - 2, int(ky + rh) - 2),
+                              (0, 220, 120) if on else (90, 90, 90), -1 if on else 1)
+                label = {"back": "<-", "enter": "|", "space": "____", "done": "done"}.get(key, key.upper())
+                cv2.putText(frame, label, (kx + 8, int(ky + rh * 0.7)), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5 if len(label) > 2 else 0.7, (10, 10, 10) if on else (230, 230, 230), 2)
 
     def _run_counts(self, cv2, cap, gui, diag):
         """Skin-colour fallback: count fingers in a box; 1/2 = scroll down/up, 3 identify, 4 screenshot."""
@@ -751,10 +907,14 @@ def count_fingers(roi, cv2, np) -> int:
 
 # ---- module-level singleton -------------------------------------------------------------------
 
-_ON_MSG = ("Hand control is ON - watch the webcam window. Point with your index finger to move the pointer, "
-           "pinch thumb+index to click (twice = double-click, hold and move = drag), thumb+middle = "
-           "right-click, two fingers = scroll (move your hand up/down), 3 fingers = identify, 4 = "
-           "screenshot; open palm = stop (or say 'stop watching my hands').")
+_ON_MSG = ("Hand control is ON - watch the webcam window.\n"
+           "  point = move the pointer      pinch thumb+index = click (twice = double-click, hold = drag)\n"
+           "  open your palm then close it = grab and drag; open again to drop\n"
+           "  fold your index + touch thumb to middle = right-click     two fingers = scroll\n"
+           "  flick 3 fingers: left/right = previous/next tab, up = switch app, down = close tab\n"
+           "  flick 4 fingers left/right = desktops;  hold 3 = identify;  hold 4 = screenshot\n"
+           "  thumb + little finger = show the keyboard (point at letters to type)\n"
+           "  hold an open palm = stop (or say 'stop watching my hands').")
 
 
 class _ProcessController:

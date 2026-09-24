@@ -729,6 +729,32 @@ class ActionBroker:
 
         return self._gated(req, do, "[file contents unavailable during verification]")
 
+    # ---- keyboard (shortcuts, typing) ----------------------------------------------------------
+
+    def run_shortcut(self, name: str, number=None) -> str:
+        """Press a keyboard shortcut (tabs, apps, desktops, lock/sleep). Gated by 'run_command' - it
+        drives the keyboard of whatever app is in front."""
+        from core.shortcuts import press
+        label = f"{name.replace('_', ' ')}{f' {number}' if number else ''}"
+        req = ActionRequest("run_command", f"Press the {label} shortcut", details=label)
+        return self._gated(req, lambda: press(name, number), f"Would press {label}.")
+
+    def type_text(self, text: str) -> str:
+        """Type text into whatever app is focused. Gated by 'run_command'."""
+        text = str(text)
+        req = ActionRequest("run_command", f"Type {len(text)} characters into the focused app",
+                            details=text[:200])
+
+        def do():
+            ok = _osl().type_text(text)
+            if not ok:
+                return ("I couldn't type that - macOS needs JARVIS allowed in System Settings > Privacy & "
+                        "Security > Accessibility.")
+            short = text if len(text) <= 60 else text[:57] + "..."
+            return f"Typed: {short}"
+
+        return self._gated(req, do, f"Would type {text[:60]!r} into the focused app.")
+
     # ---- clipboard, file search, document text, apps (the "tools" skills) ----------------------
 
     def read_clipboard(self) -> str:
