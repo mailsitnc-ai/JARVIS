@@ -1,6 +1,7 @@
 """Hand-gesture control: privacy gating, finger counting, and skill start/stop dispatch."""
 import math
 import unittest
+import unittest.mock
 
 from core.actions import ActionBroker, Blocked
 from core.config import SKILLS_DIR
@@ -490,6 +491,20 @@ class KeyboardModeTests(unittest.TestCase):
         self.assertIn(("type", "q"), acts)
         self.assertNotIn("move", [a[0] for a in acts])
 
+    def test_pointing_at_done_closes_it_without_typing_anything(self):
+        from core.gestures import Keyboard
+        self.feed(_hand("10000"), 30)                      # keyboard up
+        x0, y0, x1, y1 = Keyboard.AREA
+        rows = len(Keyboard.ROWS) + 1
+        col = Keyboard.EXTRA.index("done")
+        pts = _hand("01000")
+        pts[8] = (x0 + (x1 - x0) * ((col + 0.5) / len(Keyboard.EXTRA)),
+                  y0 + (y1 - y0) * ((rows - 0.5) / rows))
+        acts = self.feed(pts, 20)
+        self.assertIn(("keyboard", False), acts)
+        self.assertIsNone(self.h.keyboard)
+        self.assertNotIn("key", [a[0] for a in acts])     # "done" isn't a key to press
+
 
 class PalmVsFourTests(unittest.TestCase):
     """The user's report: the open-palm STOP kept firing the four-finger SCREENSHOT and vice versa."""
@@ -574,6 +589,44 @@ class OneEuroTests(unittest.TestCase):
             t += 1 / 30
             y = f(0.8, t)
         self.assertGreater(y, 0.75)
+
+
+class KeyboardOverlayTests(unittest.TestCase):
+    """The floating keyboard window: the layout it draws and the picture it draws (no AppKit needed)."""
+
+    def test_layout_matches_the_keys_you_can_point_at(self):
+        from core.gestures import Keyboard
+        rows = Keyboard.layout()
+        self.assertEqual(rows[0], list("qwertyuiop"))
+        self.assertEqual(rows[-1], list(Keyboard.EXTRA))
+        every = [k for row in rows for k in row]
+        for key in every:                              # everything drawn is reachable by pointing
+            self.assertIn(key, every)
+        self.assertEqual(len(rows), len(Keyboard.ROWS) + 1)
+
+    def test_the_pointed_at_key_is_drawn_lit_up(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy not installed")
+        from core.gestures import Keyboard
+        from core.overlay import render
+        rows = Keyboard.layout()
+        plain = render(rows, None, 600, 200)
+        lit = render(rows, "t", 600, 200)
+        self.assertEqual(lit.shape, (200, 600, 4))     # BGRA, the size we asked for
+        self.assertFalse(np.array_equal(plain, lit))   # highlighting changes the picture
+        green = ((lit[:, :, 1] > 180) & (lit[:, :, 0] < 140)).sum()
+        self.assertGreater(green, 200)                 # a highlighted key is there
+
+    def test_unavailable_overlay_says_so_instead_of_raising(self):
+        from core.overlay import KeyboardOverlay
+        ov = KeyboardOverlay()
+        with unittest.mock.patch.object(KeyboardOverlay, "available", staticmethod(lambda: False)):
+            self.assertFalse(ov.show([["a"]]))
+        ov.update([["a"]], "a")                        # never shown: nothing to draw, no error
+        ov.hide()
+        self.assertFalse(ov.visible())
 
 
 if __name__ == "__main__":

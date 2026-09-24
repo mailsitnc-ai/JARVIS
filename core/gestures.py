@@ -80,14 +80,20 @@ class OneEuro:
 class Keyboard:
     """A keyboard you type by POINTING at it (no pinching): the fingertip's position in the camera frame
     picks a key, and resting on it for a moment types it. Holding still repeats, so double letters
-    ("three") work without moving away. The layout is drawn in the preview window, so nothing steals
-    focus from the app you're typing into."""
+    ("three") work without moving away. On macOS the layout pops up in its own floating window over
+    whatever you're using (see core/overlay.py) - it's click-through and never takes focus, so the
+    letters land in the app you were already in. Elsewhere it's drawn in the preview window."""
 
     ROWS = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
     EXTRA = ("space", "back", "enter", "done")
     AREA = (0.06, 0.32, 0.94, 0.96)        # where the keyboard sits in the camera frame
     DWELL = 0.28                           # s pointing at a key before it types
     REPEAT = 0.65                          # s to repeat while you stay on the same key
+
+    @classmethod
+    def layout(cls):
+        """The rows of keys, the way both the floating window and the preview draw them."""
+        return [list(row) for row in cls.ROWS] + [list(cls.EXTRA)]
 
     def __init__(self):
         self.key = None                    # key under the fingertip
@@ -388,11 +394,11 @@ class HandInterpreter:
                 return acts
             if pose in ("point", "pinch", "two"):
                 key = self.keyboard.update(p[8][0], p[8][1], t)
-                if key:
+                if key == "done":                 # "done" closes the keyboard, it isn't a key to press
+                    self.keyboard = None
+                    acts.append(("keyboard", False))
+                elif key:
                     acts.append(("key", key) if key in Keyboard.EXTRA else ("type", key))
-                    if key == "done":
-                        self.keyboard = None
-                        acts.append(("keyboard", False))
                 self.label = f"keyboard: {self.keyboard.key or '-'}" if self.keyboard else "keyboard off"
             return acts
         # GRAB: open your palm, then close it - like picking something up. Moving the closed hand drags;
@@ -590,7 +596,8 @@ class GestureController:
         if "keyboard" in text:
             on = "off" not in text
             hand.set_keyboard(on)
-            return "Keyboard up - point at a letter and rest on it." if on else "Keyboard away."
+            return ("Keyboard's up on screen - point at a letter and rest on it." if on
+                else "Keyboard away.")
         return f"I don't know the hand-control command {text!r}."
 
     # ---- actions ------------------------------------------------------------------------------
@@ -668,8 +675,8 @@ class GestureController:
             from core.shortcuts import press
             self.emit("gesture", press(act[1]))
         elif kind == "keyboard":
-            self.emit("gesture", "Keyboard up - point at a letter and rest on it for a moment. Thumb + "
-                                 "thumbs-up again (or 'done') to put it away." if act[1]
+            self.emit("gesture", "Keyboard up on screen - point at a letter and rest on it for a moment. "
+                                 "Thumbs-up again (or point at 'done') to put it away." if act[1]
                       else "Keyboard away.")
         elif kind == "stop":
             self._stop.set()
@@ -777,6 +784,8 @@ class GestureController:
             speed, mode = 1.0, "relative"
         hand = HandInterpreter(oslayer.screen_size(), speed, mode)
         self._hand = hand              # so a typed/spoken command can open the keyboard
+        from core.overlay import KeyboardOverlay
+        overlay, floating = KeyboardOverlay(), False
         kb_shown = False
         diag.line(f"pointer_speed={speed} mode={hand.mode} gain={hand.gain:.0f}")
         while not self._stop.is_set():
@@ -787,13 +796,20 @@ class GestureController:
             now = time.time()
             pts, world = tracker.detect(frame, cv2)
             acts = hand.update(pts, now, world)
-            if gui and (hand.keyboard is not None) != kb_shown:
+            if (hand.keyboard is not None) != kb_shown:
                 kb_shown = hand.keyboard is not None
-                try:    # a bigger window while typing, so the keys are easy to see and hit
-                    cv2.resizeWindow(_WINDOW, 1000, 750) if kb_shown else cv2.resizeWindow(_WINDOW, 640, 480)
-                    cv2.setWindowProperty(_WINDOW, cv2.WND_PROP_TOPMOST, 1 if kb_shown else 0)
-                except cv2.error:
-                    pass
+                # Its own floating window, over every app: the preview goes behind the moment you
+                # click somewhere, so it can't be what you type on.
+                floating = overlay.show(Keyboard.layout()) if kb_shown else (overlay.hide(), False)[1]
+                diag.line(f"keyboard={kb_shown} floating={floating}")
+                if gui and not floating:    # no floating window here: enlarge the preview instead
+                    try:
+                        cv2.resizeWindow(_WINDOW, 1000, 750) if kb_shown else cv2.resizeWindow(_WINDOW, 640, 480)
+                        cv2.setWindowProperty(_WINDOW, cv2.WND_PROP_TOPMOST, 1 if kb_shown else 0)
+                    except cv2.error:
+                        pass
+            if floating and kb_shown:
+                overlay.update(Keyboard.layout(), hand.keyboard.key)
             for act in acts:
                 self._perform(act, frame)
             diag.frame(now, pts is not None, hand.pose, acts)
@@ -803,6 +819,7 @@ class GestureController:
             if shown is None:
                 break
             gui = gui and shown
+        overlay.hide()
         for act in hand.update(None, time.time()):   # release anything still held
             self._perform(act, None)
 
@@ -949,7 +966,7 @@ _ON_MSG = ("Hand control is ON - watch the webcam window.\n"
            "  fold your index + touch thumb to middle = right-click     two fingers = scroll\n"
            "  flick 3 fingers: left/right = previous/next tab, up = switch app, down = close tab\n"
            "  flick 4 fingers left/right = desktops;  hold 3 = identify;  hold 4 = screenshot\n"
-           "  thumbs-up = show/hide the keyboard (point at a letter and rest on it to type)\n"
+           "  thumbs-up = the on-screen keyboard pops up (point at a letter, rest on it to type)\n"
            "  hold an open palm = stop (or say 'stop watching my hands').")
 
 
@@ -991,7 +1008,8 @@ class _ProcessController:
         except (OSError, ValueError):
             return "I couldn't reach the hand-control window."
         on = "off" not in text
-        return "Keyboard up - point at a letter and rest on it." if on else "Keyboard away."
+        return ("Keyboard's up on screen - point at a letter and rest on it." if on
+                else "Keyboard away.")
 
     def stop(self):
         if self.running():
