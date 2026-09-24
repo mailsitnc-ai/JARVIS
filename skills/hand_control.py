@@ -19,8 +19,10 @@ SKILL = {
         r"\b(?:watch|read|track|use|follow)\b[^.\n]*\bmy\s+hands?\b",
         r"\b(?:enable|start|turn\s+on|use)\b[^.\n]*\bgestures?\b",
         r"\bstop\b[^.\n]*\b(?:hand|hands|gesture)\b",
+        r"^\W*(?:jarvis[,\s]+)?(?:show|hide|open|close|bring up|put away)\s+(?:the\s+|my\s+)?keyboard\b",
+        r"^\W*keyboard\s*(?:on|off)?\W*$",
     ],
-    "version": 2,
+    "version": 3,
     "origin": "builtin",
 }
 
@@ -29,8 +31,18 @@ def _actions(context):
     return context.get("actions") or ActionBroker(dry_run=bool(context.get("dry_run")))
 
 
+_KEYBOARD = re.compile(r"\bkeyboard\b", re.IGNORECASE)
+_HIDE = re.compile(r"\b(?:hide|close|put\s+away|off|dismiss)\b", re.IGNORECASE)
+
+
 def run(request, context):
     actions = _actions(context)
+    if _KEYBOARD.search(request):
+        on = not _HIDE.search(request)
+        if context.get("dry_run"):
+            return f"Would {'show' if on else 'hide'} the point-to-type keyboard."
+        from core import gestures
+        return gestures.command("keyboard " + ("on" if on else "off"))
     stop = re.search(r"\b(?:stop|turn\s+off|disable|end|quit|off)\b", request, re.IGNORECASE)
     if stop:
         return "Would stop hand control." if context.get("dry_run") else actions.stop_gesture_control()

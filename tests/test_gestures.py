@@ -438,7 +438,7 @@ class KeyboardTests(unittest.TestCase):
 
 
 class KeyboardModeTests(unittest.TestCase):
-    """Thumb + little finger shows and hides the keyboard; while it's up, pointing types."""
+    """A thumbs-up shows and hides the keyboard; while it's up, pointing types."""
 
     def setUp(self):
         from core.gestures import HandInterpreter
@@ -452,17 +452,34 @@ class KeyboardModeTests(unittest.TestCase):
             acts += self.h.update(pts, self.t)
         return acts
 
-    def test_shaka_toggles_the_keyboard(self):
-        acts = self.feed(_hand("10001"), 30)
+    def test_thumbs_up_toggles_the_keyboard(self):
+        acts = self.feed(_hand("10000"), 30)
         self.assertIn(("keyboard", True), acts)
         self.assertIsNotNone(self.h.keyboard)
-        self.t += 2
-        self.assertIn(("keyboard", False), self.feed(_hand("10001"), 30))
+        self.feed(_hand("01000"), 6)                       # drop the sign
+        self.assertIn(("keyboard", False), self.feed(_hand("10000"), 30))
+        self.assertIsNone(self.h.keyboard)
+
+    def test_holding_the_thumbs_up_toggles_only_once(self):
+        """From the user's log: holding the sign turned the keyboard on and straight back off."""
+        acts = self.feed(_hand("10000"), 150)              # 5 seconds of thumbs-up
+        self.assertEqual([a for a in acts if a[0] == "keyboard"], [("keyboard", True)])
+        self.assertIsNotNone(self.h.keyboard)
+
+    def test_a_thumbs_up_is_not_a_fist_or_a_grab(self):
+        self.assertEqual(self.h.classify(_hand("10000")), "thumbsup")
+        self.assertEqual(self.h.classify(_hand("00000")), "fist")
+
+    def test_voice_can_open_and_close_it(self):
+        self.assertTrue(self.h.set_keyboard(True))
+        self.assertIsNotNone(self.h.keyboard)
+        self.assertFalse(self.h.set_keyboard(True))        # already open: nothing to do
+        self.assertTrue(self.h.set_keyboard(False))
         self.assertIsNone(self.h.keyboard)
 
     def test_pointing_types_instead_of_moving_the_pointer(self):
         from core.gestures import Keyboard
-        self.feed(_hand("10001"), 30)                      # keyboard up
+        self.feed(_hand("10000"), 30)                      # keyboard up
         x0, y0, x1, y1 = Keyboard.AREA
         rows = len(Keyboard.ROWS) + 1
         kx = x0 + (x1 - x0) * (0.5 / 10)                   # 'q' - first key of the top row

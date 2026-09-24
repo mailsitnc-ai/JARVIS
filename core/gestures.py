@@ -8,6 +8,9 @@ model), the hand works like a mouse:
   pinch thumb + middle finger    right-click
   two fingers (index + middle)   scroll like a joystick: move the hand up/down from where you started -
                                  further = faster
+  thumbs-up (hold)               show/hide the point-and-type keyboard
+  flick 3 fingers                left/right = previous/next tab, up = switch app, down = close tab
+  flick 4 fingers                left/right = previous/next desktop
   three fingers (hold)           identify what you're holding (vision)
   four fingers (hold)            screenshot
   open palm (hold)               stop hand control          fist = rest (nothing happens)
@@ -162,7 +165,7 @@ class HandInterpreter:
         self._track_idx = 8            # index fingertip (knuckle while pinching, palm centre while grabbing)
         self.grab = False              # open palm then close = grab and drag, open again to let go
         self.keyboard = None           # a Keyboard while point-to-type mode is on
-        self.kb_toggled = -1e9
+        self.kb_armed = False          # the current thumbs-up has already toggled the keyboard
         self.swipe_from = None         # (x, y, t) where the current 3/4-finger gesture started
         self.swipe_done = False        # a swipe already fired for this gesture
         self.next_swipe = 0.0
@@ -268,15 +271,15 @@ class HandInterpreter:
             return None
         return raw
 
-    KB_HOLD = 0.6          # s to hold the thumb+pinky "call me" sign to show/hide the keyboard
+    KB_HOLD = 0.7          # s to hold a thumbs-up to show/hide the keyboard
     SPREAD_PALM = 0.9      # index-to-pinky tip spread that says "open palm" rather than "four fingers"
     GRAB_WINDOW = 1.6      # s: closing the hand this soon after opening it is a GRAB, not a stop
     GRAB_GRACE = 1.5       # s after letting go before an open palm can stop hand control again
 
     def classify(self, p) -> str:
         thumb, i, m, r, k = self.fingers(p)
-        if thumb and k and not (i or m or r):
-            return "shaka"                   # thumb + little finger: show/hide the keyboard
+        if thumb and not (i or m or r or k):
+            return "thumbsup"                # thumbs up: show/hide the keyboard
         if i and not (m or r or k):
             return "point"
         if i and m and not (r or k):
@@ -325,6 +328,14 @@ class HandInterpreter:
                 min(max(self.cursor[1] + dy * self.gain * accel, 0), self.sh - 1))
 
     # -- main step --
+    def set_keyboard(self, on: bool) -> bool:
+        """Turn point-to-type on/off from outside (a voice or typed command)."""
+        want = bool(on)
+        if want == (self.keyboard is not None):
+            return False
+        self.keyboard = Keyboard() if want else None
+        return True
+
     def update(self, p, t: float, world=None) -> list:
         """p: 21 (x, y) points in the frame. world: the same points in 3D (metres), when available -
         used for every finger/pinch measurement so a finger pointing at the camera still reads as
@@ -359,13 +370,17 @@ class HandInterpreter:
             if pose not in self.SWIPES:
                 self.swipe_from, self.swipe_done = None, False
         held = t - self.pose_since
-        # Keyboard on/off: thumb + little finger held for a moment.
-        if pose == "shaka" and held >= self.KB_HOLD and t - self.kb_toggled > 1.5:
-            self.kb_toggled = t
-            self.keyboard = None if self.keyboard else Keyboard()
-            self.label = "keyboard on - point at the letters" if self.keyboard else "keyboard off"
-            acts.append(("keyboard", bool(self.keyboard)))
+        # Keyboard on/off: a thumbs-up held for a moment. Fires ONCE per thumbs-up - you have to drop
+        # the sign and make it again to toggle back (holding it used to flip it straight off again).
+        if pose == "thumbsup":
+            if held >= self.KB_HOLD and not self.kb_armed:
+                self.kb_armed = True
+                self.keyboard = None if self.keyboard else Keyboard()
+                acts.append(("keyboard", bool(self.keyboard)))
+            self.label = ("keyboard on - point at the letters" if self.keyboard else "keyboard off") \
+                if self.kb_armed else "hold the thumbs-up..."
             return acts
+        self.kb_armed = False
         # While the keyboard is up, pointing types instead of moving the pointer.
         if self.keyboard is not None:
             if pose == "palm" and held >= self.HOLD["palm"]:
@@ -567,6 +582,17 @@ class GestureController:
     def running(self):
         return self._thread is not None and self._thread.is_alive()
 
+    def command(self, text: str) -> str:
+        """'keyboard on' / 'keyboard off' from a typed or spoken command."""
+        hand = getattr(self, "_hand", None)
+        if hand is None:
+            return "Hand control is still starting up."
+        if "keyboard" in text:
+            on = "off" not in text
+            hand.set_keyboard(on)
+            return "Keyboard up - point at a letter and rest on it." if on else "Keyboard away."
+        return f"I don't know the hand-control command {text!r}."
+
     # ---- actions ------------------------------------------------------------------------------
 
     def _scroll(self, up: bool, held: float):
@@ -643,7 +669,7 @@ class GestureController:
             self.emit("gesture", press(act[1]))
         elif kind == "keyboard":
             self.emit("gesture", "Keyboard up - point at a letter and rest on it for a moment. Thumb + "
-                                 "little finger again (or 'done') to put it away." if act[1]
+                                 "thumbs-up again (or 'done') to put it away." if act[1]
                       else "Keyboard away.")
         elif kind == "stop":
             self._stop.set()
@@ -705,7 +731,8 @@ class GestureController:
             return
         gui = True
         try:
-            cv2.namedWindow(_WINDOW, cv2.WINDOW_AUTOSIZE)
+            cv2.namedWindow(_WINDOW, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(_WINDOW, 640, 480)
         except cv2.error:
             gui = False
             self.emit("gesture", "No preview window (headless OpenCV) - gestures still work; open palm to stop.")
@@ -738,9 +765,9 @@ class GestureController:
             self.emit("gesture", "I can see your hand, but macOS isn't letting me move the pointer yet: allow "
                                  "JARVIS in System Settings > Privacy & Security > Accessibility, then restart "
                                  "hand control.")
-        self.emit("gesture", "Hand control on - point to move the pointer, pinch thumb+index to click (hold to "
-                             "drag), thumb+middle = right-click, two fingers = scroll, 3 = identify, "
-                             "4 = screenshot, open palm = stop.")
+        self.emit("gesture", "Hand control on - point to move, pinch to click, open-then-close to grab, "
+                             "two fingers to scroll, flick 3 fingers for tabs, thumbs-up for the keyboard, "
+                             "hold an open palm to stop.")
         try:
             from core.config import load_settings
             settings = load_settings()
@@ -749,6 +776,8 @@ class GestureController:
         except Exception:
             speed, mode = 1.0, "relative"
         hand = HandInterpreter(oslayer.screen_size(), speed, mode)
+        self._hand = hand              # so a typed/spoken command can open the keyboard
+        kb_shown = False
         diag.line(f"pointer_speed={speed} mode={hand.mode} gain={hand.gain:.0f}")
         while not self._stop.is_set():
             frame = self._read(cap, cv2)
@@ -758,6 +787,13 @@ class GestureController:
             now = time.time()
             pts, world = tracker.detect(frame, cv2)
             acts = hand.update(pts, now, world)
+            if gui and (hand.keyboard is not None) != kb_shown:
+                kb_shown = hand.keyboard is not None
+                try:    # a bigger window while typing, so the keys are easy to see and hit
+                    cv2.resizeWindow(_WINDOW, 1000, 750) if kb_shown else cv2.resizeWindow(_WINDOW, 640, 480)
+                    cv2.setWindowProperty(_WINDOW, cv2.WND_PROP_TOPMOST, 1 if kb_shown else 0)
+                except cv2.error:
+                    pass
             for act in acts:
                 self._perform(act, frame)
             diag.frame(now, pts is not None, hand.pose, acts)
@@ -913,7 +949,7 @@ _ON_MSG = ("Hand control is ON - watch the webcam window.\n"
            "  fold your index + touch thumb to middle = right-click     two fingers = scroll\n"
            "  flick 3 fingers: left/right = previous/next tab, up = switch app, down = close tab\n"
            "  flick 4 fingers left/right = desktops;  hold 3 = identify;  hold 4 = screenshot\n"
-           "  thumb + little finger = show the keyboard (point at letters to type)\n"
+           "  thumbs-up = show/hide the keyboard (point at a letter and rest on it to type)\n"
            "  hold an open palm = stop (or say 'stop watching my hands').")
 
 
@@ -927,7 +963,8 @@ class _ProcessController:
         self.error = None
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.proc = subprocess.Popen([sys.executable, "-m", "core.gestures", str(camera_index)], cwd=root,
-                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                     text=True, bufsize=1)
         self._reader = threading.Thread(target=self._read, daemon=True)
         self._reader.start()
 
@@ -946,6 +983,15 @@ class _ProcessController:
 
     def running(self):
         return self.proc.poll() is None
+
+    def command(self, text: str) -> str:
+        try:
+            self.proc.stdin.write(text.strip() + "\n")
+            self.proc.stdin.flush()
+        except (OSError, ValueError):
+            return "I couldn't reach the hand-control window."
+        on = "off" not in text
+        return "Keyboard up - point at a letter and rest on it." if on else "Keyboard away."
 
     def stop(self):
         if self.running():
@@ -972,6 +1018,14 @@ def start(runner, emit=None, camera_index=0) -> str:
     return _ON_MSG
 
 
+def command(text: str) -> str:
+    """Send a command to a running hand-control session ('keyboard on' / 'keyboard off')."""
+    with _LOCK:
+        if _ACTIVE is None or not _ACTIVE.running():
+            return "Hand control isn't running - say 'watch my hands' first."
+        return _ACTIVE.command(text)
+
+
 def stop() -> str:
     with _LOCK:
         if _ACTIVE is not None and _ACTIVE.running():
@@ -994,6 +1048,11 @@ def _child_main(camera_index: int = 0) -> None:
             os._exit(0)   # the panel went away - stop
 
     ctl = GestureController(lambda cmd: out(run=cmd), lambda _kind, text: out(emit=text), camera_index)
+
+    def read_commands():
+        for line in sys.stdin:                  # the panel sends "keyboard on" / "keyboard off"
+            ctl.command(line.strip())
+    threading.Thread(target=read_commands, daemon=True).start()
     import signal
     # JARVIS stops us with SIGTERM: stop the loop cleanly so the camera is released and the private
     # temp folder is wiped (the default SIGTERM would kill us before any cleanup ran).
