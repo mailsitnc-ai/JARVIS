@@ -86,9 +86,12 @@ class Keyboard:
 
     ROWS = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
     EXTRA = ("space", "back", "enter", "done")
-    AREA = (0.06, 0.32, 0.94, 0.96)        # where the keyboard sits in the camera frame
-    DWELL = 0.28                           # s pointing at a key before it types
-    REPEAT = 0.65                          # s to repeat while you stay on the same key
+    AREA = (0.04, 0.30, 0.96, 0.98)        # where the keyboard sits in the camera frame
+    DWELL = 0.30                           # s resting on a key before it types
+    REPEAT = 0.70                          # s to repeat while you stay on the same key
+    STICKY = 0.30                          # how far into the next key you must go for it to take over
+    MOVING = 0.75                          # frame-widths/s: sweeping faster than this doesn't type
+    SETTLE = 0.55                          # the speed filter, per frame (0-1: higher = quicker to react)
 
     @classmethod
     def layout(cls):
@@ -100,6 +103,50 @@ class Keyboard:
         self.key_since = 0.0
         self.last_typed = 0.0
         self.typed_key = None
+        self.word = ""                     # the word being typed, for autocorrect
+        self.speed = 0.0                   # how fast the fingertip is moving across the keys
+        self._at = None                    # last (x, y, t)
+
+    def cell(self, key):
+        """(x0, y0, x1, y1) of a key in the frame - the box you have to be inside to pick it."""
+        x0, y0, x1, y1 = self.AREA
+        rows = self.layout()
+        rh = (y1 - y0) / len(rows)
+        for r, keys in enumerate(rows):
+            if key in keys:
+                kw = (x1 - x0) / len(keys)
+                c = keys.index(key)
+                return x0 + c * kw, y0 + r * rh, x0 + (c + 1) * kw, y0 + (r + 1) * rh
+        return None
+
+    def _still_on(self, key, x: float, y: float) -> bool:
+        """Is the fingertip still on this key, allowing a STICKY overhang into its neighbours?"""
+        box = self.cell(key)
+        if box is None:
+            return False
+        kx0, ky0, kx1, ky1 = box
+        ox, oy = (kx1 - kx0) * self.STICKY, (ky1 - ky0) * self.STICKY
+        return kx0 - ox <= x <= kx1 + ox and ky0 - oy <= y <= ky1 + oy
+
+    def progress(self, t: float) -> float:
+        """0 to 1: how close the key under your finger is to typing - drawn as a filling bar."""
+        if self.key is None or self.speed > self.MOVING:
+            return 0.0
+        if self.typed_key is None:
+            return min(1.0, max(0.0, (t - self.key_since) / self.DWELL))
+        return min(1.0, max(0.0, (t - self.last_typed) / self.REPEAT))
+
+    def finish_word(self):
+        """At a space or enter: (letters to rub out, the word you meant) if the last word was mistyped."""
+        word, self.word = self.word, ""
+        if len(word) < 3:
+            return None
+        try:
+            from core.wordfix import correct
+        except Exception:
+            return None
+        fixed = correct(word)
+        return (len(word), fixed) if fixed and fixed != word else None
 
     def key_at(self, x: float, y: float):
         """Which key is at this point in the frame (None outside the keyboard)."""
@@ -117,20 +164,34 @@ class Keyboard:
 
     def update(self, x: float, y: float, t: float):
         """Returns the key to send now (or None). Repeats while you stay on one key."""
+        if self._at:
+            dt = max(1e-3, t - self._at[2])
+            moving = math.hypot(x - self._at[0], y - self._at[1]) / dt
+            self.speed += self.SETTLE * (moving - self.speed)   # smoothed: one jumpy frame isn't a sweep
+        self._at = (x, y, t)
         key = self.key_at(x, y)
+        if key != self.key and self.key is not None and self._still_on(self.key, x, y):
+            key = self.key                     # grazing the edge of the next key doesn't switch to it
         if key != self.key:
             self.key, self.key_since, self.typed_key = key, t, None
         if key is None:
             return None
-        if self.typed_key is None:
-            if t - self.key_since >= self.DWELL:
-                self.typed_key, self.last_typed = key, t
-                return key
+        if self.speed > self.MOVING:
+            self.key_since = t                 # still sweeping: the rest starts when you slow down
             return None
-        if t - self.last_typed >= self.REPEAT:      # still resting on it: type it again
+        if self.typed_key is None:
+            if t - self.key_since < self.DWELL:
+                return None
+            self.typed_key, self.last_typed = key, t
+        elif t - self.last_typed >= self.REPEAT:   # still resting on it: type it again
             self.last_typed = t
-            return key
-        return None
+        else:
+            return None
+        if key == "back":
+            self.word = self.word[:-1]
+        elif key not in self.EXTRA:
+            self.word += key
+        return key
 
 
 class HandInterpreter:
@@ -398,6 +459,10 @@ class HandInterpreter:
                     self.keyboard = None
                     acts.append(("keyboard", False))
                 elif key:
+                    if key in ("space", "enter"):     # word finished: fix it the way a phone would
+                        fix = self.keyboard.finish_word()
+                        if fix:
+                            acts.append(("fix", fix[0], fix[1]))
                     acts.append(("key", key) if key in Keyboard.EXTRA else ("type", key))
                 self.label = f"keyboard: {self.keyboard.key or '-'}" if self.keyboard else "keyboard off"
             return acts
@@ -561,6 +626,15 @@ class _Diag:
 
 # ---- the camera loop --------------------------------------------------------------------------
 
+def _warm_autocorrect():
+    """The word list takes a moment to read - do it when the keyboard opens, not mid-sentence."""
+    try:
+        from core import wordfix
+        wordfix.dictionary()
+    except Exception:
+        pass
+
+
 class GestureController:
     def __init__(self, runner, emit=None, camera_index=0, hold_scroll=0.2, hold_action=0.6, cooldown=3.0,
                  scroll_px=(18, 70), ramp_secs=1.5, vote_frames=7):
@@ -575,6 +649,7 @@ class GestureController:
         self.ramp_secs = ramp_secs
         self.vote_frames = vote_frames
         self.error = None
+        self.fixed = ("", 0.0)         # the last autocorrect, to show on the keyboard for a moment
         self._stop = threading.Event()
         self._thread = None
 
@@ -669,6 +744,11 @@ class GestureController:
             self._fire_async(self.runner, "take a screenshot")
         elif kind == "type":
             oslayer.type_text(act[1])
+        elif kind == "fix":                    # autocorrect: rub out the typo, type the word you meant
+            for _ in range(act[1]):
+                oslayer.key_press("backspace")
+            oslayer.type_text(act[2])
+            self.fixed = (act[2], time.time())
         elif kind == "key":
             oslayer.key_press({"back": "backspace", "enter": "return", "space": "space"}.get(act[1], act[1]))
         elif kind == "shortcut":
@@ -801,6 +881,8 @@ class GestureController:
                 # Its own floating window, over every app: the preview goes behind the moment you
                 # click somewhere, so it can't be what you type on.
                 floating = overlay.show(Keyboard.layout()) if kb_shown else (overlay.hide(), False)[1]
+                if kb_shown:
+                    self._fire_async(_warm_autocorrect)   # load the word list off the camera thread
                 diag.line(f"keyboard={kb_shown} floating={floating}")
                 if gui and not floating:    # no floating window here: enlarge the preview instead
                     try:
@@ -809,7 +891,9 @@ class GestureController:
                     except cv2.error:
                         pass
             if floating and kb_shown:
-                overlay.update(Keyboard.layout(), hand.keyboard.key)
+                kb = hand.keyboard
+                note = f"fixed: {self.fixed[0]}" if now - self.fixed[1] < 3.5 else ""
+                overlay.update(Keyboard.layout(), kb.key, kb.progress(now), kb.word, note)
             for act in acts:
                 self._perform(act, frame)
             diag.frame(now, pts is not None, hand.pose, acts)

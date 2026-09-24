@@ -19,18 +19,28 @@ HINT = "point at a letter, rest on it to type   -   thumbs-up (or 'hide the keyb
 LABELS = {"back": "delete", "enter": "enter", "space": "space", "done": "done"}
 
 
-def render(rows, highlight, width: int, height: int):
-    """The keyboard as a BGRA image: dark translucent panel, keys drawn, the pointed-at key lit up."""
+def render(rows, highlight, width: int, height: int, progress: float = 0.0, word: str = "",
+           note: str = ""):
+    """The keyboard as a BGRA image: dark translucent panel, the key under your finger lit up with a
+    bar filling as it's about to type, and the word you're typing (plus any autocorrect) along the top."""
     import cv2
     import numpy as np
 
     img = np.zeros((height, width, 4), dtype=np.uint8)
     pad = max(6, width // 90)
-    top = int(height * 0.13)                      # hint strip above the keys
+    top = int(height * 0.15)                      # status strip above the keys
+    font = cv2.FONT_HERSHEY_SIMPLEX
     cv2.rectangle(img, (0, 0), (width - 1, height - 1), (28, 26, 24, 240), -1)
     cv2.rectangle(img, (0, 0), (width - 1, height - 1), (120, 200, 255, 255), 2)
-    cv2.putText(img, HINT, (pad + 4, int(top * 0.72)), cv2.FONT_HERSHEY_SIMPLEX,
-                max(0.34, width / 2200), (170, 200, 220, 255), 1, cv2.LINE_AA)
+    left = f"{word}|" if word else HINT
+    cv2.putText(img, left, (pad + 4, int(top * 0.68)), font,
+                max(0.34, width / (1300 if word else 2200)),
+                (150, 245, 190, 255) if word else (170, 200, 220, 255), 2 if word else 1, cv2.LINE_AA)
+    if note:
+        scale = max(0.34, width / 2000)
+        (tw, _), _ = cv2.getTextSize(note, font, scale, 1)
+        cv2.putText(img, note, (width - tw - pad - 6, int(top * 0.68)), font, scale,
+                    (120, 200, 255, 255), 1, cv2.LINE_AA)
     rh = (height - top - pad) / max(1, len(rows))
     for r, keys in enumerate(rows):
         kw = (width - 2 * pad) / max(1, len(keys))
@@ -42,11 +52,14 @@ def render(rows, highlight, width: int, height: int):
             cv2.rectangle(img, box[:2], box[2:], (90, 215, 120, 255) if on else (64, 60, 56, 255), -1)
             if not on:
                 cv2.rectangle(img, box[:2], box[2:], (110, 104, 98, 255), 1)
+            elif progress > 0:            # the bar fills while you rest: move away and nothing is typed
+                bar = int((x2 - x - 8) * min(1.0, progress))
+                cv2.rectangle(img, (int(x) + 4, int(y2) - 12), (int(x) + 4 + bar, int(y2) - 5),
+                              (25, 70, 30, 255), -1)
             label = LABELS.get(key, key.upper())
             scale = max(0.4, rh / (52 if len(label) <= 2 else 110))
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, scale, 2)
-            cv2.putText(img, label, (int(x + (kw - tw) / 2), int(y + (rh + th) / 2)),
-                        cv2.FONT_HERSHEY_SIMPLEX, scale,
+            (tw, th), _ = cv2.getTextSize(label, font, scale, 2)
+            cv2.putText(img, label, (int(x + (kw - tw) / 2), int(y + (rh + th) / 2)), font, scale,
                         (20, 30, 20, 255) if on else (235, 235, 235, 255), 2, cv2.LINE_AA)
     return img
 
@@ -61,7 +74,7 @@ class KeyboardOverlay:
         self.window = None
         self.view = None
         self.size = (0, 0)
-        self._drawn = object()      # last highlighted key we rendered
+        self._drawn = None          # what we last drew: (key, progress, word, note)
 
     @staticmethod
     def available() -> bool:
@@ -110,7 +123,7 @@ class KeyboardOverlay:
         try:
             if self.window is None:
                 self._build()
-            self._drawn = object()
+            self._drawn = None
             self.update(rows, None)
             self.window.orderFrontRegardless()        # visible without activating JARVIS
             self.pump()
@@ -119,17 +132,18 @@ class KeyboardOverlay:
             self.window = self.view = None
             return False
 
-    def update(self, rows, highlight) -> None:
-        """Redraw only when the key under the fingertip changed - a few times a second, not 30."""
-        if self.window is None or highlight == self._drawn:
+    def update(self, rows, highlight, progress: float = 0.0, word: str = "", note: str = "") -> None:
+        """Redraw only when something visible changed - a few times a second, not thirty."""
+        state = (highlight, round(float(progress or 0.0) * 8), word, note)
+        if self.window is None or state == self._drawn:
             return
-        self._drawn = highlight
+        self._drawn = state
         try:
             import AppKit
             import cv2
 
             w, h = self.size
-            ok, buf = cv2.imencode(".png", render(rows, highlight, w, h))
+            ok, buf = cv2.imencode(".png", render(rows, highlight, w, h, progress, word, note))
             if not ok:
                 return
             raw = buf.tobytes()
@@ -158,7 +172,7 @@ class KeyboardOverlay:
             self.pump()
         except Exception:
             pass
-        self._drawn = object()
+        self._drawn = None
 
     def visible(self) -> bool:
         try:

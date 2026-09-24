@@ -425,6 +425,75 @@ class KeyboardTests(unittest.TestCase):
             typed += self.point_at(letter, 0.45)
         self.assertEqual(typed, list("thre"))
 
+    def sweep(self, start, end, seconds, step=1 / 30):
+        """Move the fingertip from one key to another; returns everything typed on the way."""
+        (x0, y0), (x1, y1) = self.centre(start), self.centre(end)
+        out, frames = [], max(1, int(seconds / step))
+        for i in range(1, frames + 1):
+            self.t += step
+            k = self.kb.update(x0 + (x1 - x0) * i / frames, y0 + (y1 - y0) * i / frames, self.t)
+            if k:
+                out.append(k)
+        return out
+
+    def test_sweeping_across_the_keys_does_not_type_the_ones_you_pass_over(self):
+        """The user's report: pointing around produced too many typos - keys typed in passing."""
+        self.assertEqual(self.sweep("q", "p", 0.5), [])       # straight across the whole top row
+        self.assertEqual(self.point_at("p", 0.5)[:1], ["p"])  # stopping there still types
+
+    def test_a_key_only_types_once_you_have_slowed_down(self):
+        self.sweep("q", "g", 0.35)
+        typed = self.point_at("g", 0.25)                      # rest is shorter than settling + dwell
+        self.assertEqual(typed, [])
+        self.assertEqual(self.point_at("g", 0.4)[:1], ["g"])
+
+    def test_grazing_the_next_key_does_not_switch_to_it(self):
+        from core.gestures import Keyboard
+        self.point_at("q", 0.5)
+        x0, y0, x1, y1 = Keyboard.AREA
+        kw = (x1 - x0) / len(Keyboard.ROWS[0])
+        edge = x0 + kw + kw * 0.2                             # just over the line into 'w'
+        for _ in range(10):
+            self.t += 1 / 30
+            self.kb.update(edge, self.centre("q")[1], self.t)
+        self.assertEqual(self.kb.key, "q")                    # still 'q': no accidental 'w'
+        for _ in range(10):                                   # well into 'w' - now it switches
+            self.t += 1 / 30
+            self.kb.update(self.centre("w")[0], self.centre("w")[1], self.t)
+        self.assertEqual(self.kb.key, "w")
+
+    def test_the_bar_fills_up_while_you_rest_so_you_can_pull_away(self):
+        x, y = self.centre("t")
+        filling, typed = [], None
+        for _ in range(40):
+            self.t += 1 / 60
+            typed = self.kb.update(x, y, self.t)
+            if typed:
+                break
+            filling.append(round(self.kb.progress(self.t), 3))
+        self.assertEqual(typed, "t")
+        self.assertLess(filling[0], 0.2)                  # starts empty
+        self.assertGreater(max(filling), 0.9)             # nearly full just before it types
+        self.assertEqual(filling, sorted(filling))        # and only ever fills
+
+    def test_the_word_you_are_typing_is_tracked_and_autocorrected(self):
+        for letter in "thre":
+            self.point_at(letter, 0.45)
+        self.assertEqual(self.kb.word, "thre")
+        self.assertEqual(self.kb.finish_word(), (4, "three"))
+        self.assertEqual(self.kb.word, "")                    # the next word starts clean
+
+    def test_delete_takes_a_letter_off_the_word_too(self):
+        for letter in "th":
+            self.point_at(letter, 0.45)
+        self.point_at("back", 0.45)
+        self.assertEqual(self.kb.word, "t")
+
+    def test_a_word_that_is_already_right_is_left_alone(self):
+        for letter in "the":
+            self.point_at(letter, 0.45)
+        self.assertIsNone(self.kb.finish_word())
+
     def test_a_double_letter_repeats_without_moving_away(self):
         """'three' ends in a double e - resting on the key types it again."""
         typed = self.point_at("e", 1.1)
@@ -490,6 +559,29 @@ class KeyboardModeTests(unittest.TestCase):
         acts = self.feed(pts, 20)
         self.assertIn(("type", "q"), acts)
         self.assertNotIn("move", [a[0] for a in acts])
+
+    def test_a_space_after_a_typo_fixes_the_word(self):
+        from core.gestures import Keyboard
+        self.feed(_hand("10000"), 30)                      # keyboard up
+        x0, y0, x1, y1 = Keyboard.AREA
+        rows = len(Keyboard.ROWS) + 1
+        base = _hand("01000")[8]
+
+        def point(key, frames=20):
+            """Move the WHOLE hand so the index tip lands on a key (just moving the tip = a fist)."""
+            for r, keys in enumerate(Keyboard.layout()):
+                if key in keys:
+                    kw, rh = (x1 - x0) / len(keys), (y1 - y0) / rows
+                    tx, ty = x0 + kw * (keys.index(key) + 0.5), y0 + rh * (r + 0.5)
+                    return self.feed(_hand("01000", dx=tx - base[0], dy=ty - base[1]), frames)
+            raise AssertionError(key)
+
+        acts = []
+        for letter in "thre":
+            acts += point(letter)
+        self.assertEqual([a[1] for a in acts if a[0] == "type"], list("thre"))
+        acts = point("space")
+        self.assertEqual(acts[:2], [("fix", 4, "three"), ("key", "space")])   # fixed, then the space
 
     def test_pointing_at_done_closes_it_without_typing_anything(self):
         from core.gestures import Keyboard
