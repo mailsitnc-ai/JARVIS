@@ -97,7 +97,10 @@ DEFAULTS: dict[str, Any] = {
         # allow the microphone on an https page, which Tailscale gives you for free.
         "enabled": False,
         "port": 8765,
-        "host": "127.0.0.1",
+        # 0.0.0.0 so your phone on the same wi-fi can reach it; the page is locked to a secret token.
+        "host": "0.0.0.0",
+        # Phones only allow the microphone on https, so JARVIS serves it with its own certificate.
+        "https": True,
     },
     "memory": {
         "max_interactions": 5000,

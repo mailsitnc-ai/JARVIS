@@ -5,17 +5,22 @@ number, a public server, per-minute charges); this does the same thing over your
 Mac serves one small page, your phone opens it, you hold the button and talk, and JARVIS answers in
 its own voice. Your speech is transcribed by the Whisper on this machine - the audio never leaves it.
 
-Reaching it from outside the house: `tailscale serve --bg 8765`, which puts it on your private
-tailnet with a real HTTPS certificate. That matters for more than privacy - phones only allow
-microphone access on a secure page, so plain http over the LAN won't be allowed to record.
+A phone will only hand a web page its microphone over HTTPS, so the page is served with a
+certificate JARVIS makes for itself. Your phone shows a "not private" warning the first time
+(nobody signed the certificate - it's your own Mac on your own network); accept it once and the
+microphone works from then on.
 
 The page is locked to a token that's generated once and kept in JARVIS's data folder, so only a
-device you've given the link to can talk to it.
+device you've given the link to can talk to it. To reach it from outside the house, put it on a
+private tailnet with `tailscale serve --bg 8765` instead.
 """
 from __future__ import annotations
 
 import json
 import secrets
+import socket
+import ssl
+import subprocess
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,6 +30,46 @@ from urllib.parse import parse_qs, urlparse
 PORT = 8765
 MAX_AUDIO = 8 * 1024 * 1024        # a held button, not a podcast
 
+
+def lan_ip() -> str:
+    """This Mac's address on the home network - what you type into the phone."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 1))       # a reserved address: nothing is actually sent
+        return probe.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        probe.close()
+
+
+def certificate(ip: str | None = None):
+    """A certificate for this Mac, made once with openssl and kept in JARVIS's folder. Remade if
+    the machine's address on the network has changed, so the phone keeps trusting it."""
+    from core import oslayer
+
+    folder = Path(oslayer.user_data_dir())
+    cert, key = folder / "talk-cert.pem", folder / "talk-key.pem"
+    where = ip or lan_ip()
+    if cert.exists() and key.exists():
+        try:
+            names = subprocess.run(["openssl", "x509", "-in", str(cert), "-noout", "-text"],
+                                   capture_output=True, text=True, timeout=10).stdout
+            if where in names:
+                return cert, key
+        except (OSError, subprocess.SubprocessError):
+            return cert, key
+    try:
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                        "-keyout", str(key), "-out", str(cert), "-days", "3650",
+                        "-subj", "/CN=JARVIS", "-addext",
+                        f"subjectAltName=IP:{where},IP:127.0.0.1,DNS:localhost"],
+                       capture_output=True, timeout=60, check=True)
+        key.chmod(0o600)
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    return cert, key
+
 PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -32,33 +77,41 @@ PAGE = """<!DOCTYPE html>
 <style>
   :root { color-scheme: dark; }
   body { margin:0; min-height:100vh; background:#07090d; color:#e8edf2; display:flex;
-         flex-direction:column; align-items:center; font:16px/1.5 -apple-system,system-ui,sans-serif; }
-  header { padding:22px 16px 6px; letter-spacing:.34em; font-size:13px; color:#7fd4ff; }
-  #log { flex:1; width:100%; max-width:640px; padding:12px 16px 120px; box-sizing:border-box;
-         overflow-y:auto; }
+         flex-direction:column; font:16px/1.5 -apple-system,system-ui,sans-serif; }
+  header { padding:20px 16px 4px; letter-spacing:.34em; font-size:13px; color:#7fd4ff;
+           text-align:center; }
+  .state { text-align:center; color:#7c8899; font-size:14px; padding:2px 16px 8px; min-height:20px; }
+  #log { flex:1; width:100%; max-width:640px; margin:0 auto; padding:8px 16px 190px;
+         box-sizing:border-box; overflow-y:auto; }
   .turn { margin:10px 0; padding:11px 14px; border-radius:16px; max-width:85%; white-space:pre-wrap; }
   .me { margin-left:auto; background:#16324a; border-bottom-right-radius:4px; }
   .jarvis { background:#141922; border:1px solid #23303f; border-bottom-left-radius:4px; }
-  .state { text-align:center; color:#7c8899; font-size:14px; padding:2px 16px 8px; min-height:20px; }
-  footer { position:fixed; bottom:0; left:0; right:0; padding:18px 0 34px; display:flex;
-           justify-content:center; background:linear-gradient(transparent,#07090d 38%); }
-  #talk { width:132px; height:132px; border-radius:50%; border:none; color:#04121c; font-size:17px;
+  footer { position:fixed; bottom:0; left:0; right:0; padding:16px 0 30px; display:flex;
+           flex-direction:column; align-items:center; gap:14px;
+           background:linear-gradient(transparent,#07090d 30%); }
+  #talk { width:126px; height:126px; border-radius:50%; border:none; color:#04121c; font-size:17px;
           font-weight:600; background:radial-gradient(circle at 50% 35%, #8fe3ff, #29a8dd);
           box-shadow:0 0 40px rgba(41,168,221,.45); touch-action:none; user-select:none; }
   #talk.on { background:radial-gradient(circle at 50% 35%, #ffd39a, #f0803a);
              box-shadow:0 0 60px rgba(240,128,58,.6); transform:scale(1.06); }
-  #talk:disabled { opacity:.5; box-shadow:none; }
+  #talk:disabled { opacity:.45; box-shadow:none; }
+  #call { border:1px solid #2b6b8d; background:#0d1a24; color:#8fe3ff; border-radius:24px;
+          padding:11px 26px; font-size:15px; font-weight:600; }
+  #call.on { border-color:#8b2f2f; background:#2a1113; color:#ff9c9c; }
 </style></head>
 <body>
   <header>J A R V I S</header>
-  <div class="state" id="state">hold the button and speak</div>
+  <div class="state" id="state">hold to talk, or press Call to keep the line open</div>
   <div id="log"></div>
-  <footer><button id="talk">hold<br>to talk</button></footer>
+  <footer>
+    <button id="talk">hold<br>to talk</button>
+    <button id="call">Call</button>
+  </footer>
 <script>
 const token = new URLSearchParams(location.search).get('k') || '';
 const log = document.getElementById('log'), state = document.getElementById('state');
-const talk = document.getElementById('talk');
-let recorder = null, chunks = [], busy = false;
+const talk = document.getElementById('talk'), call = document.getElementById('call');
+let stream = null, recorder = null, onCall = false, busy = false, wakeLock = null;
 
 function say(who, text) {
   const div = document.createElement('div');
@@ -66,53 +119,127 @@ function say(who, text) {
   div.textContent = text;
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
-  return div;
 }
 
-async function begin() {
-  if (busy || recorder) return;
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({audio: true});
-    recorder = new MediaRecorder(stream);
-    chunks = [];
-    recorder.ondataavailable = e => chunks.push(e.data);
-    recorder.onstop = () => { stream.getTracks().forEach(t => t.stop()); send(new Blob(chunks)); };
-    recorder.start();
+async function mic() {
+  if (!stream) stream = await navigator.mediaDevices.getUserMedia({audio: true});
+  return stream;
+}
+
+/* Record until you stop speaking (for a call), or until the button is let go. */
+function record(untilSilence) {
+  return new Promise(async (resolve) => {
+    let src;
+    try { src = await mic(); } catch (e) {
+      state.textContent = 'the browser blocked the microphone (the page must be https)';
+      return resolve(null);
+    }
+    const rec = new MediaRecorder(src);
+    const chunks = [];
+    rec.ondataavailable = e => chunks.push(e.data);
+    rec.onstop = () => resolve(new Blob(chunks));
+    rec.start();
+    recorder = rec;
     talk.classList.add('on');
     state.textContent = 'listening...';
-  } catch (err) {
-    state.textContent = 'the browser blocked the microphone (an https address is needed)';
-  }
+    if (!untilSilence) return;
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    ctx.createMediaStreamSource(src).connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    let spoke = false, quietAt = performance.now(), began = performance.now();
+    const watch = setInterval(() => {
+      if (rec.state !== 'recording') { clearInterval(watch); ctx.close(); return; }
+      analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      const level = Math.sqrt(sum / buf.length), now = performance.now();
+      if (level > 0.02) { spoke = true; quietAt = now; }
+      const nothingSaid = !spoke && now - began > 9000;
+      const finished = spoke && now - quietAt > 1200;
+      if (nothingSaid || finished || now - began > 25000) {
+        clearInterval(watch); ctx.close();
+        stop();
+      }
+    }, 100);
+  });
 }
 
-function end() {
+function stop() {
   if (!recorder) return;
   talk.classList.remove('on');
-  state.textContent = 'thinking...';
-  recorder.stop();
+  const rec = recorder;
   recorder = null;
+  if (rec.state === 'recording') rec.stop();
 }
 
-async function send(blob) {
-  if (blob.size < 2000) { state.textContent = 'hold the button and speak'; return; }
-  busy = true; talk.disabled = true;
+async function ask(blob) {
+  if (!blob || blob.size < 2000) return null;
+  state.textContent = 'thinking...';
+  const res = await fetch('/ask?k=' + encodeURIComponent(token), {method: 'POST', body: blob});
+  return await res.json();
+}
+
+function play(url) {
+  return new Promise((resolve) => {
+    const audio = new Audio(url + '?k=' + encodeURIComponent(token));
+    audio.onended = audio.onerror = resolve;
+    audio.play().catch(resolve);
+  });
+}
+
+async function turn(untilSilence) {
+  busy = true;
+  talk.disabled = true;
   try {
-    const res = await fetch('/ask?k=' + encodeURIComponent(token), {method: 'POST', body: blob});
-    const data = await res.json();
-    if (data.heard) say('me', data.heard);
-    say('jarvis', data.text || data.error || 'no answer');
-    state.textContent = 'hold the button and speak';
-    if (data.audio) new Audio(data.audio + '?k=' + encodeURIComponent(token)).play().catch(() => {});
-  } catch (err) {
+    const blob = await record(untilSilence);
+    const data = await ask(blob);
+    if (data) {
+      if (data.heard) say('me', data.heard);
+      say('jarvis', data.text || data.error || 'no answer');
+      state.textContent = onCall ? 'speaking...' : 'hold to talk, or press Call';
+      if (data.audio) await play(data.audio);        // wait, so it doesn't hear itself
+    }
+  } catch (e) {
     state.textContent = 'lost the connection to the Mac';
+    onCall = false;
+    call.classList.remove('on');
+    call.textContent = 'Call';
   }
-  busy = false; talk.disabled = false;
+  busy = false;
+  talk.disabled = false;
+  state.textContent = onCall ? 'listening...' : 'hold to talk, or press Call';
 }
 
-talk.addEventListener('pointerdown', e => { e.preventDefault(); begin(); });
-talk.addEventListener('pointerup', e => { e.preventDefault(); end(); });
-talk.addEventListener('pointercancel', end);
-talk.addEventListener('pointerleave', end);
+/* A call: listen, answer, listen again, until you hang up. */
+async function conversation() {
+  while (onCall) {
+    await turn(true);
+    if (!onCall) break;
+    await new Promise(r => setTimeout(r, 250));
+  }
+}
+
+call.addEventListener('click', async () => {
+  onCall = !onCall;
+  call.classList.toggle('on', onCall);
+  call.textContent = onCall ? 'End call' : 'Call';
+  if (onCall) {
+    try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+    say('jarvis', 'Line open, sir. Just talk.');
+    conversation();
+  } else {
+    stop();
+    if (wakeLock) { try { wakeLock.release(); } catch (e) {} wakeLock = null; }
+    state.textContent = 'hold to talk, or press Call';
+  }
+});
+
+talk.addEventListener('pointerdown', e => { e.preventDefault(); if (!onCall && !busy) turn(false); });
+talk.addEventListener('pointerup', e => { e.preventDefault(); if (!onCall) stop(); });
+talk.addEventListener('pointercancel', () => { if (!onCall) stop(); });
+talk.addEventListener('pointerleave', () => { if (!onCall) stop(); });
 </script></body></html>
 """
 
@@ -144,11 +271,12 @@ def token() -> str:
 class TalkServer:
     """Serves the hold-to-talk page and answers what it sends. `ask(text) -> reply`."""
 
-    def __init__(self, ask, port: int = PORT, host: str = "127.0.0.1", secret: str | None = None,
-                 transcribe=None, voice=True, emit=None):
+    def __init__(self, ask, port: int = PORT, host: str = "0.0.0.0", secret: str | None = None,
+                 transcribe=None, voice=True, emit=None, https: bool = True):
         self.ask = ask
         self.port = int(port)
         self.host = host
+        self.https = bool(https)
         self.secret = secret or token()
         self.transcribe = transcribe or self._whisper
         self.voice = bool(voice)
@@ -270,6 +398,16 @@ class TalkServer:
 
         self.httpd = ThreadingHTTPServer((self.host, self.port), Handler)
         self.port = int(self.httpd.server_address[1])     # port 0 means "any free one" - report it
+        if self.https:
+            cert, key = certificate()
+            if cert and key:
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context.load_cert_chain(str(cert), str(key))
+                self.httpd.socket = context.wrap_socket(self.httpd.socket, server_side=True)
+            else:
+                self.https = False
+                self.emit("I couldn't make a certificate, so the page is plain http - a phone won't "
+                          "give it the microphone.")
         self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True,
                                         name="jarvis-talk")
         self._thread.start()
@@ -285,7 +423,9 @@ class TalkServer:
         return self.httpd is not None and self._thread is not None and self._thread.is_alive()
 
     def url(self) -> str:
-        return f"http://{self.host}:{self.port}/?k={self.secret}"
+        """The address to open on the phone (its own network address, not 0.0.0.0)."""
+        where = lan_ip() if self.host in ("0.0.0.0", "") else self.host
+        return f"{'https' if self.https else 'http'}://{where}:{self.port}/?k={self.secret}"
 
 
 # ---- one server per JARVIS ----------------------------------------------------------------------
@@ -306,11 +446,14 @@ def start() -> str:
         return f"Already listening on {_ACTIVE.url()}"
     settings = _HANDLERS.get("settings")
     _ACTIVE = TalkServer(_HANDLERS["ask"], port=int(settings.get("talk.port", PORT) if settings else PORT),
-                         host=str(settings.get("talk.host", "127.0.0.1") if settings else "127.0.0.1"),
+                         host=str(settings.get("talk.host", "0.0.0.0") if settings else "0.0.0.0"),
+                         https=bool(settings.get("talk.https", True) if settings else True),
                          emit=_HANDLERS.get("emit"))
     url = _ACTIVE.start()
-    return (f"Talk page up at {url}\nOn your phone: run `tailscale serve --bg {_ACTIVE.port}` here once, "
-            f"then open the tailnet address with ?k={_ACTIVE.secret} - hold the button and talk.")
+    return (f"Talk to me from your phone: {url}\n"
+            "Same wi-fi as this Mac. Your phone will warn that the certificate isn't trusted - it's "
+            "this Mac's own; accept it once and the microphone works. Hold the button to talk, or "
+            "press Call to keep the line open.")
 
 
 def stop() -> str:

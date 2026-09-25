@@ -9,10 +9,16 @@ from tests.helpers import IsolatedCase
 
 
 def get(url, data=None, kind="application/octet-stream"):
-    """(status, body) - never raises for an error status, so the test can assert on it."""
+    """(status, body) - never raises for an error status, so the test can assert on it.
+    A JARVIS certificate is self-signed, so https is fetched without checking it."""
+    import ssl
+
     request = urllib.request.Request(url, data=data, headers={"Content-Type": kind} if data else {})
+    loose = ssl.create_default_context()
+    loose.check_hostname = False
+    loose.verify_mode = ssl.CERT_NONE
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=10, context=loose) as response:
             return response.status, response.read()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read()
@@ -57,7 +63,7 @@ class ServerTests(IsolatedCase):
 
     def setUp(self):
         super().setUp()
-        self.server = TalkServer(lambda text: f"you said {text}", port=0,
+        self.server = TalkServer(lambda text: f"you said {text}", port=0, https=False,
                                  transcribe=lambda raw: "hello", voice=False, secret="test-secret")
         self.server.start()
         self.addCleanup(self.server.stop)
@@ -95,6 +101,37 @@ class ServerTests(IsolatedCase):
 
     def test_unknown_pages_are_not_served(self):
         self.assertEqual(get(f"{self.base}/secrets?k=test-secret")[0], 404)
+
+class SecurePageTests(IsolatedCase):
+    """A phone only gives its microphone to an https page, so JARVIS serves one with its own cert."""
+
+    def test_the_page_is_served_over_https_with_a_certificate_it_made(self):
+        from core.talk import certificate
+        server = TalkServer(lambda text: "hi", port=0, transcribe=lambda raw: "hello", voice=False,
+                            secret="s3cret", https=True)
+        server.start()
+        self.addCleanup(server.stop)
+        if not server.https:
+            self.skipTest("openssl isn't available to make a certificate")
+        cert, key = certificate()
+        self.assertTrue(cert.exists() and key.exists())
+        self.assertTrue(server.url().startswith("https://"), server.url())
+        self.assertNotIn("0.0.0.0", server.url())          # the address the phone can actually open
+        status, body = get(f"https://127.0.0.1:{server.port}/?k=s3cret")
+        self.assertEqual(status, 200)
+        self.assertIn(b"End call", body)                   # the page can hold a call open
+
+    def test_the_certificate_names_this_mac_on_the_network(self):
+        import subprocess
+        from core.talk import certificate, lan_ip
+        cert, key = certificate()
+        if not cert:
+            self.skipTest("openssl isn't available")
+        text = subprocess.run(["openssl", "x509", "-in", str(cert), "-noout", "-text"],
+                              capture_output=True, text=True, timeout=20).stdout
+        self.assertIn(lan_ip(), text)
+        self.assertIn("127.0.0.1", text)
+
 
 class TokenTests(IsolatedCase):
     def test_the_secret_is_made_once_and_kept(self):
