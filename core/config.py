@@ -89,7 +89,7 @@ DEFAULTS: dict[str, Any] = {
         "require_wake": True,
         # Answer with a voice note as well as the text, like the bot in the video.
         "voice_replies": True,
-        "poll_s": 3,
+        "poll_s": 1.2,
     },
     "talk": {
         # The hold-to-talk page for your phone (core/talk.py): hold the button, speak, hear the

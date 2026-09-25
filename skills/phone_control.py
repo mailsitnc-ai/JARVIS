@@ -5,9 +5,9 @@
   'stop watching whatsapp'                  stop
   'is phone control on'                     status
 
-Then, from your phone, message yourself: "Jarvis, what's my battery?", "jarvis summarise the physics
-pdf", "/briefing". Voice notes work too - they're transcribed on the Mac. Risky actions ask you
-first, in the chat.
+Then, from your phone, message yourself "Jarvis" - he answers and the conversation stays open, so
+everything you send after that reaches him ("what's my battery?", "summarise the physics pdf",
+"open google docs") until you say "ok dismissed". Risky actions ask you first, in the chat.
 """
 import re
 

@@ -6,8 +6,10 @@ same chat. That's the Telegram bot from the video, except it goes through the Wh
 JARVIS already drives, so it's your own number and there's nothing to sign up for.
 
 Rules that keep it safe:
-  - only the one chat you name is watched, and by default only messages that start with "jarvis"
-    (or "/") count as commands - notes to yourself stay notes to yourself;
+  - only the one chat you name is watched, and outside a conversation only messages that start with
+    "jarvis" (or "/") count as commands - notes to yourself stay notes to yourself;
+  - say just "Jarvis" (or address him by name once) and the conversation stays open: everything you
+    send goes to him until you say "ok dismissed";
   - every reply is prefixed with a marker, so JARVIS never reads its own messages as commands;
   - anything risky (deleting, sending to other people, shell commands, settings) asks first, right
     there in the chat: it replies with the question and waits for your "yes".
@@ -25,7 +27,17 @@ import threading
 import time
 
 MARK = "\U0001f916"       # the robot face every reply starts with, so we never answer ourselves
-WAKE = re.compile(r"^\s*(?:hey\s+|ok\s+|okay\s+)?jarvis\b[\s,:.-]*|^\s*[/!]\s*", re.IGNORECASE)
+# "jarvis ...", "hey jarvis ...", "/..." - and "JarvisCould you..." run together, which is what you
+# end up typing on a phone when the wake word is compulsory.
+WAKE = re.compile(r"^\s*(?:hey\s+|hi\s+|ok\s+|okay\s+|yo\s+)?jarvis(?:\b|(?=[A-Z]))[\s,:.\-]*"
+                  r"|^\s*[/!]\s*", re.IGNORECASE)
+# Just his name, nothing else: you're calling him, not asking for anything yet.
+SUMMON = re.compile(r"^\s*(?:hey|hi|hello|yo|ok|okay|oye)?\s*jarvis\s*[!?.,]*\s*$", re.IGNORECASE)
+# The only way out of a conversation, as the user put it: "ok dismissed".
+DISMISS = re.compile(r"^\s*(?:ok(?:ay)?\s+|thanks?\s+|thank\s+you\s+|alright\s+|right\s+)*"
+                     r"(?:jarvis\s+)?(?:you'?re\s+)?(?:dismissed?|stand\s*down|that'?(?:s|ll)\s+(?:be\s+)?all"
+                     r"|we'?re\s+done|done\s+for\s+now|bye|goodbye|good\s*night)"
+                     r"(?:\s+jarvis)?\s*[!.]*\s*$", re.IGNORECASE)
 YES = re.compile(r"^\s*(?:y|yes+|yeah|yep|yup|ok|okay|sure|go|go\s+ahead|do\s+it|confirm|allow|"
                  r"please\s+do)\b", re.IGNORECASE)
 NO = re.compile(r"^\s*(?:n|no+|nope|nah|stop|cancel|don'?t|deny|never\s*mind|nvm)\b", re.IGNORECASE)
@@ -126,8 +138,8 @@ def current():
 class PhoneChannel:
     """Watches one WhatsApp chat and runs what you send it. `ask(text) -> reply` does the work."""
 
-    POLL = 3.0                # seconds between looks at the chat
-    HISTORY = 14              # how many of the last messages we re-read each time
+    POLL = 1.2                # seconds between looks at the chat
+    HISTORY = 8               # how many of the last messages we re-read each time
     CONFIRM_WAIT = 90.0       # how long to wait for a "yes" before giving up
     SNAPSHOT_WAIT = 15.0      # how long to let WhatsApp draw the chat before reading it
     MAX_REPLY = 3500          # WhatsApp's message limit is bigger, but nobody reads more than this
@@ -151,6 +163,8 @@ class PhoneChannel:
         self.last_revive = 0.0     # when we last tried to bring Chrome back
         self.away = False          # Chrome/WhatsApp is currently unreachable
         self.blank_rounds = 0      # polls in a row with no chat on screen
+        self.session = False       # you've summoned him: everything you send is for him, until
+                                   # you say "ok dismissed"
         self.preapproved = False   # you already said yes to this one request; don't ask twice
         self.inbox = queue.Queue()
         self.error = None
@@ -177,8 +191,8 @@ class PhoneChannel:
                          threading.Thread(target=self._work, daemon=True)]
         for thread in self._threads:
             thread.start()
-        return (f"Watching WhatsApp ({opened}). Message yourself \"Jarvis, ...\" from your phone and "
-                f"I'll do it here and reply.")
+        return (f"Watching WhatsApp ({opened}). Message yourself \"Jarvis\" from your phone and "
+                f"everything after that comes to me until you say \"ok dismissed\".")
 
     def stop(self) -> str:
         if not self.running():
@@ -302,7 +316,9 @@ class PhoneChannel:
                 self.outbox.append(body)
             self.away = True
             return
-        if self.voice and (voice is not False):
+        # A voice note takes a few seconds; if you've already sent the next thing, answer that
+        # first and skip the audio - being quick matters more than being heard.
+        if self.voice and (voice is not False) and self.inbox.empty():
             self._voice_note(body)
             self._forget_our_media()
 
@@ -394,11 +410,23 @@ class PhoneChannel:
             text = self._transcribe(message)
             if not text:
                 return
+        body = text.strip()
+        if self.session and DISMISS.match(body):
+            self.session = False
+            self.say('Standing by, sir. Say "Jarvis" when you need me.', voice=False)
+            return
+        if SUMMON.match(body):              # just his name: he answers and stays listening
+            self.session = True
+            self.say('At your service, sir. Everything you send now comes to me - say '
+                     '"ok dismissed" when you\'re done.', voice=False)
+            return
         answering = self.expecting          # a reply to JARVIS's own question needs no wake word
-        command = command_in(text, self.require_wake and not answering)
+        command = command_in(body, self.require_wake and not answering and not self.session)
         self.expecting = False
         if not command:
             return
+        if WAKE.match(body):                # addressing him by name opens the conversation too
+            self.session = True
         self.emit(f"WhatsApp: {command}")
         why = risk(command)
         if why and self.ask_yes_no(f'{MARK} That would {why}: "{command}".\n'
@@ -532,6 +560,8 @@ def status() -> str:
     if not running():
         return "Phone control is off. Say 'watch my whatsapp' to have me answer messages from your phone."
     channel = _ACTIVE
-    wake = "messages starting with 'jarvis'" if channel.require_wake else "every message"
+    wake = ("in conversation - everything you send comes to me until you say 'ok dismissed'"
+            if channel.session else
+            ("messages starting with 'jarvis'" if channel.require_wake else "every message"))
     voice = "with a voice note" if channel.voice else "in text"
-    return f"Watching {channel.chat}: I act on {wake} and reply {voice}."
+    return f"Watching {channel.chat}: I act on {wake}, and reply {voice}."

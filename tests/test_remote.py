@@ -325,6 +325,76 @@ class OwnWordsTests(unittest.TestCase):
         self.assertFalse(same_words("", ""))
 
 
+class ConversationTests(unittest.TestCase):
+    """Summon him once and just talk: "Hey Jarvis" opens a conversation, "ok dismissed" ends it."""
+
+    def setUp(self):
+        self.fake = FakeWhatsApp()
+        self.asked = []
+        self.channel = PhoneChannel(lambda text: self.asked.append(text) or f"done: {text}",
+                                    "Message yourself", controller=self.fake, voice=False, poll=0.05)
+        self.channel.SNAPSHOT_WAIT = 0.4
+        self.addCleanup(self.channel.stop)
+        self.channel.start()
+
+    def says(self, text):
+        self.fake.phone_says(text)
+
+    def test_his_name_on_its_own_is_answered_and_opens_the_conversation(self):
+        self.says("Hey Jarvis")
+        self.assertTrue(wait_for(lambda: self.fake.sent), "a bare summons got no answer at all")
+        self.assertIn("At your service", self.fake.sent[-1])
+        self.assertTrue(self.channel.session)
+
+    def test_everything_after_the_summons_reaches_him(self):
+        self.says("Hey Jarvis")
+        self.assertTrue(wait_for(lambda: self.channel.session))
+        self.says("what is the time")
+        self.says("and what is my battery")
+        self.assertTrue(wait_for(lambda: len(self.asked) >= 2))
+        self.assertEqual(self.asked, ["what is the time", "and what is my battery"])
+
+    def test_ok_dismissed_ends_it_and_notes_are_notes_again(self):
+        self.says("Hey Jarvis")
+        self.assertTrue(wait_for(lambda: self.channel.session))
+        self.says("ok dismissed")
+        self.assertTrue(wait_for(lambda: not self.channel.session))
+        self.assertIn("Standing by", self.fake.sent[-1])
+        self.says("remember to buy milk")
+        time.sleep(0.3)
+        self.assertEqual(self.asked, [])
+
+    def test_the_ways_of_saying_dismissed(self):
+        from core.remote import DISMISS
+        for words in ("ok dismissed", "dismissed", "you're dismissed", "jarvis dismissed",
+                      "that's all", "thanks that'll be all", "we're done", "bye jarvis", "goodbye",
+                      "stand down"):
+            self.assertTrue(DISMISS.match(words), words)
+        for keep in ("dismiss the alarm at 6", "that's all the homework i have", "bye means goodbye",
+                     "stand down the ladder from the loft"):
+            self.assertIsNone(DISMISS.match(keep), keep)
+
+    def test_addressing_him_by_name_also_opens_the_conversation(self):
+        self.says("jarvis what is the time")
+        self.assertTrue(wait_for(lambda: self.asked))
+        self.assertTrue(self.channel.session)
+        self.says("and the weather")
+        self.assertTrue(wait_for(lambda: len(self.asked) >= 2))
+        self.assertEqual(self.asked[1], "and the weather")
+
+    def test_a_name_run_into_the_message_still_counts(self):
+        """Typed on a phone when the wake word is compulsory: "JarvisCould you open docs"."""
+        from core.remote import command_in
+        self.assertEqual(command_in("JarvisCould you open Google docs"), "Could you open Google docs")
+        self.assertEqual(command_in("Jarvis, could you open docs"), "could you open docs")
+
+    def test_before_any_summons_notes_are_left_alone(self):
+        self.says("milk, eggs, bread")
+        time.sleep(0.3)
+        self.assertEqual(self.asked, [])
+        self.assertEqual(self.fake.sent, [])
+
+
 class ChromeGoesAwayTests(unittest.TestCase):
     """You shouldn't have to keep Chrome running: if it's quit or crashed, JARVIS brings it back."""
 
