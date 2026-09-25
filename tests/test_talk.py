@@ -1,6 +1,7 @@
 """The hold-to-talk page: audio in from the phone, JARVIS's answer back out."""
 import json
 import unittest
+import unittest.mock
 import urllib.error
 import urllib.request
 
@@ -102,6 +103,37 @@ class ServerTests(IsolatedCase):
     def test_unknown_pages_are_not_served(self):
         self.assertEqual(get(f"{self.base}/secrets?k=test-secret")[0], 404)
 
+class HomeScreenTests(IsolatedCase):
+    """"Calling" JARVIS = tapping an icon on the phone that opens straight into a call."""
+
+    def setUp(self):
+        super().setUp()
+        self.server = TalkServer(lambda text: "hi", port=0, https=False, secret="test-secret",
+                                 transcribe=lambda raw: "hello", voice=False)
+        self.server.start()
+        self.addCleanup(self.server.stop)
+        self.base = f"http://127.0.0.1:{self.server.port}"
+
+    def test_the_phone_is_offered_an_app_that_starts_a_call(self):
+        status, body = get(f"{self.base}/manifest.webmanifest?k=test-secret")
+        self.assertEqual(status, 200)
+        manifest = json.loads(body)
+        self.assertEqual(manifest["short_name"], "JARVIS")
+        self.assertEqual(manifest["display"], "standalone")
+        self.assertIn("call=1", manifest["start_url"])         # the icon dials straight in
+        self.assertIn("icon.png", manifest["icons"][0]["src"])
+
+    def test_there_is_an_icon(self):
+        status, body = get(f"{self.base}/icon.png?k=test-secret")
+        self.assertEqual(status, 200)
+        self.assertTrue(body.startswith(b"\x89PNG"), "not a PNG")
+
+    def test_the_call_link_shows_the_connect_tap(self):
+        status, body = get(f"{self.base}/?k=test-secret&call=1")
+        self.assertEqual(status, 200)
+        self.assertIn(b"tap anywhere to connect", body)
+
+
 class SecurePageTests(IsolatedCase):
     """A phone only gives its microphone to an https page, so JARVIS serves one with its own cert."""
 
@@ -131,6 +163,76 @@ class SecurePageTests(IsolatedCase):
                               capture_output=True, text=True, timeout=20).stdout
         self.assertIn(lan_ip(), text)
         self.assertIn("127.0.0.1", text)
+
+
+class TunnelTests(IsolatedCase):
+    """Calling JARVIS from outside: one outbound tunnel publishing just this page - not a VPN."""
+
+    def setUp(self):
+        super().setUp()
+        from core import talk
+        self.talk = talk
+        self.addCleanup(talk.unexpose)
+
+    def fake_tunnel(self, url="https://made-up-words-here.trycloudflare.com", dies=False):
+        """Stand in for cloudflared: writes the address it was given into its log, like the real one."""
+        talk = self.talk
+
+        class FakeProc:
+            def __init__(self, *args, **kwargs):
+                self.args = args[0] if args else []
+                handle = kwargs.get("stdout")
+                if not dies and handle is not None:
+                    handle.write(f"INF |  {url}  |\n")
+                    handle.flush()
+                self._done = 0 if dies else None
+
+            def poll(self):
+                return self._done
+
+            def terminate(self):
+                self._done = 0
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                self._done = 0
+
+        return unittest.mock.patch.object(talk.subprocess, "Popen", FakeProc)
+
+    def test_the_outside_address_is_handed_back_with_the_token(self):
+        with unittest.mock.patch.object(self.talk, "tunnel_cli", lambda: "/bin/echo"), self.fake_tunnel():
+            answer = self.talk.expose(8765, "sekret", wait=6)
+        self.assertIn("https://made-up-words-here.trycloudflare.com", answer)
+        self.assertIn("k=sekret", self.talk.public_url())
+        self.assertIn("call=1", self.talk.public_url())      # opens straight into a call
+        self.assertIn("keep it to yourself", answer)         # the warning is part of the answer
+
+    def test_asking_twice_does_not_open_a_second_one(self):
+        with unittest.mock.patch.object(self.talk, "tunnel_cli", lambda: "/bin/echo"), self.fake_tunnel():
+            self.talk.expose(8765, "sekret", wait=6)
+            again = self.talk.expose(8765, "sekret", wait=6)
+        self.assertIn("Already reachable", again)
+
+    def test_closing_it_puts_the_page_back_on_your_wifi_only(self):
+        with unittest.mock.patch.object(self.talk, "tunnel_cli", lambda: "/bin/echo"), self.fake_tunnel():
+            self.talk.expose(8765, "sekret", wait=6)
+        self.assertIn("Closed", self.talk.unexpose())
+        self.assertEqual(self.talk.public_url(), "")
+        self.assertIn("wasn't shared", self.talk.unexpose())
+
+    def test_a_tunnel_that_falls_over_is_reported(self):
+        with unittest.mock.patch.object(self.talk, "tunnel_cli", lambda: "/bin/echo"), \
+             self.fake_tunnel(dies=True):
+            answer = self.talk.expose(8765, "sekret", wait=4)
+        self.assertIn("stopped before it was ready", answer)
+        self.assertEqual(self.talk.public_url(), "")
+
+    def test_it_says_what_it_needs_when_the_program_is_missing(self):
+        with unittest.mock.patch.object(self.talk, "tunnel_cli", lambda: None), \
+             unittest.mock.patch.object(self.talk, "install_tunnel", lambda: "no internet"):
+            self.assertEqual(self.talk.expose(8765, "sekret", wait=2), "no internet")
 
 
 class TokenTests(IsolatedCase):

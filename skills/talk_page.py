@@ -16,6 +16,8 @@ SKILL = {
                    "talk page', 'close the talk page', 'where's the talk page'.",
     "triggers": [
         r"\btalk\s+page\b|\bhold[\s-]to[\s-]talk\b",
+        r"\b(?:share|tunnel|publish)\b[^.\n]*\btalk\s+page\b|"
+        r"\bcall\s+(?:you|jarvis)\b[^.\n]*\b(?:outside|anywhere|away|mobile\s+data)\b",
         r"\b(?:start|open|launch|bring\s+up|close|stop)\b[^.\n]*\btalk\s+page\b",
         r"\b(?:talk|speak)\s+to\s+(?:you|jarvis)\b[^.\n]*\b(?:from|on)\s+(?:my\s+)?phone\b",
         r"\b(?:phone|mobile)\s+(?:mic|microphone|voice)\b",
@@ -26,6 +28,11 @@ SKILL = {
 }
 
 _OFF = re.compile(r"\b(?:stop|close|disable|turn\s+off|switch\s+off|shut|end)\b", re.IGNORECASE)
+_OUTSIDE = re.compile(r"\b(?:outside|anywhere|away\s+from\s+home|out\s+of\s+the\s+house|tunnel|"
+                      r"not\s+at\s+home|mobile\s+data|publish|expose|share\s+the\s+talk\s+page)\b",
+                      re.IGNORECASE)
+_STOP_SHARING = re.compile(r"\b(?:stop|close|end|no\s+longer)\b[^.\n]*\b(?:shar\w+|tunnel|publish\w*|"
+                           r"outside)\b", re.IGNORECASE)
 _WHERE = re.compile(r"\b(?:where|what'?s\s+the\s+(?:link|url|address)|link|address)\b", re.IGNORECASE)
 
 
@@ -33,8 +40,17 @@ def run(request, context):
     from core import talk
     if context.get("dry_run"):
         return "Would start the hold-to-talk page for your phone."
-    if _OFF.search(request):
+    if _OFF.search(request) and not _OUTSIDE.search(request):
         return talk.stop()
+    if _OUTSIDE.search(request):          # reachable away from the house, through a tunnel
+        if _OFF.search(request) or _STOP_SHARING.search(request):
+            return talk.unexpose()
+        if not talk.running():
+            talk.start()
+        return talk.expose(getattr(talk._ACTIVE, "port", talk.PORT),
+                           getattr(talk._ACTIVE, "secret", None))
     if _WHERE.search(request) and talk.running():
-        return f"The talk page is at {talk.url()}"
+        outside = talk.public_url()
+        return (f"The talk page is at {talk.url()}"
+                + (f"\nFrom outside: {outside}" if outside else ""))
     return talk.start()

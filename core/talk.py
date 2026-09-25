@@ -10,18 +10,23 @@ certificate JARVIS makes for itself. Your phone shows a "not private" warning th
 (nobody signed the certificate - it's your own Mac on your own network); accept it once and the
 microphone works from then on.
 
+Away from home, `expose()` publishes just this page through a tunnel - one outbound connection
+from the Mac, no VPN, nothing about your networking changed - and that address has a real
+certificate, so there's no warning at all.
+
 The page is locked to a token that's generated once and kept in JARVIS's data folder, so only a
-device you've given the link to can talk to it. To reach it from outside the house, put it on a
-private tailnet with `tailscale serve --bg 8765` instead.
+device you've given the link to can talk to it.
 """
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import socket
 import ssl
 import subprocess
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -74,6 +79,13 @@ PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>JARVIS</title>
+<!-- Add to Home Screen: the icon opens straight into a call, like ringing someone. -->
+<link rel="manifest" id="mf">
+<link rel="apple-touch-icon" id="ic">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="JARVIS">
+<meta name="theme-color" content="#07090d">
 <style>
   :root { color-scheme: dark; }
   body { margin:0; min-height:100vh; background:#07090d; color:#e8edf2; display:flex;
@@ -98,6 +110,14 @@ PAGE = """<!DOCTYPE html>
   #call { border:1px solid #2b6b8d; background:#0d1a24; color:#8fe3ff; border-radius:24px;
           padding:11px 26px; font-size:15px; font-weight:600; }
   #call.on { border-color:#8b2f2f; background:#2a1113; color:#ff9c9c; }
+  #connect { position:fixed; inset:0; z-index:9; display:none; flex-direction:column; gap:22px;
+             align-items:center; justify-content:center; background:#07090d; }
+  #connect.show { display:flex; }
+  #connect .ring { width:168px; height:168px; border-radius:50%;
+                   background:radial-gradient(circle at 50% 35%, #8fe3ff, #29a8dd);
+                   box-shadow:0 0 70px rgba(41,168,221,.5); animation:pulse 1.8s ease-in-out infinite; }
+  #connect p { color:#7c8899; }
+  @keyframes pulse { 50% { transform:scale(1.06); box-shadow:0 0 90px rgba(41,168,221,.75); } }
 </style></head>
 <body>
   <header>J A R V I S</header>
@@ -107,8 +127,12 @@ PAGE = """<!DOCTYPE html>
     <button id="talk">hold<br>to talk</button>
     <button id="call">Call</button>
   </footer>
+  <div id="connect"><div class="ring"></div><p>tap anywhere to connect</p></div>
 <script>
-const token = new URLSearchParams(location.search).get('k') || '';
+const params = new URLSearchParams(location.search);
+const token = params.get('k') || '';
+document.getElementById('mf').href = '/manifest.webmanifest?k=' + encodeURIComponent(token);
+document.getElementById('ic').href = '/icon.png?k=' + encodeURIComponent(token);
 const log = document.getElementById('log'), state = document.getElementById('state');
 const talk = document.getElementById('talk'), call = document.getElementById('call');
 let stream = null, recorder = null, onCall = false, busy = false, wakeLock = null;
@@ -236,12 +260,161 @@ call.addEventListener('click', async () => {
   }
 });
 
+/* Opened from the home-screen icon (or any ?call=1 link): one tap and you're connected. A phone
+   won't give out the microphone without a tap, so that's the fewest taps possible. */
+if (params.get('call') === '1') {
+  const connect = document.getElementById('connect');
+  connect.classList.add('show');
+  connect.addEventListener('click', () => {
+    connect.classList.remove('show');
+    call.click();
+  }, {once: true});
+}
+
 talk.addEventListener('pointerdown', e => { e.preventDefault(); if (!onCall && !busy) turn(false); });
 talk.addEventListener('pointerup', e => { e.preventDefault(); if (!onCall) stop(); });
 talk.addEventListener('pointercancel', () => { if (!onCall) stop(); });
 talk.addEventListener('pointerleave', () => { if (!onCall) stop(); });
 </script></body></html>
 """
+
+
+# ---- reaching it from outside the house (a tunnel, not a VPN) -----------------------------------
+# A tunnel is one outbound connection from this Mac that publishes THIS PAGE and nothing else:
+# nothing about the Mac's networking changes, and none of your other traffic goes through it.
+# Cloudflare hands back an https address with a real certificate, so the phone stops warning about
+# the Mac's self-signed one - and it works on mobile data, not just at home.
+
+CLOUDFLARED = Path.home() / "bin" / "cloudflared"
+DOWNLOAD = ("https://github.com/cloudflare/cloudflared/releases/latest/download/"
+            "cloudflared-darwin-{arch}.tgz")
+_TUNNEL: dict = {"proc": None, "url": "", "log": None}
+
+
+def tunnel_cli() -> str | None:
+    """Where the tunnel program is, if it's here."""
+    import shutil
+
+    if CLOUDFLARED.exists():
+        return str(CLOUDFLARED)
+    return shutil.which("cloudflared")
+
+
+def install_tunnel() -> str | None:
+    """Fetch the tunnel program (one file, into ~/bin - no admin rights, nothing system-wide)."""
+    import platform
+    import tarfile
+    import tempfile
+    import urllib.request
+
+    arch = "arm64" if platform.machine() in ("arm64", "aarch64") else "amd64"
+    CLOUDFLARED.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp) / "cloudflared.tgz"
+            urllib.request.urlretrieve(DOWNLOAD.format(arch=arch), bundle)
+            with tarfile.open(bundle) as archive:
+                archive.extractall(tmp)
+            Path(tmp, "cloudflared").replace(CLOUDFLARED)
+        CLOUDFLARED.chmod(0o755)
+    except Exception as exc:
+        return f"I couldn't fetch the tunnel program: {exc}"
+    return None
+
+
+def expose(port: int = PORT, secret: str | None = None, wait: float = 40.0) -> str:
+    """Publish the talk page on the internet so you can call JARVIS when you're out."""
+    import tempfile
+
+    if public_url():
+        return f"Already reachable from outside: {public_url()}"
+    cli = tunnel_cli()
+    if not cli:
+        problem = install_tunnel()
+        if problem:
+            return problem
+        cli = tunnel_cli()
+    log = Path(tempfile.gettempdir()) / "jarvis-tunnel.log"
+    try:
+        handle = open(log, "w")
+        proc = subprocess.Popen([cli, "tunnel", "--no-autoupdate", "--no-tls-verify",
+                                 "--url", f"https://127.0.0.1:{int(port)}"],
+                                stdout=handle, stderr=subprocess.STDOUT, close_fds=True)
+    except OSError as exc:
+        return f"I couldn't start the tunnel: {exc}"
+    _TUNNEL.update(proc=proc, log=handle, url="")
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        time.sleep(1.0)
+        if proc.poll() is not None:
+            return "The tunnel stopped before it was ready - check your internet connection."
+        found = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", log.read_text(errors="ignore"))
+        if found:
+            _TUNNEL["url"] = f"{found.group(0)}/?k={secret or token()}&call=1"
+            return (f"You can call me from anywhere now: {_TUNNEL['url']}\n"
+                    "Real certificate, so no warning - add it to your home screen. Anyone with that "
+                    "exact link could talk to me, so keep it to yourself; say 'stop sharing the talk "
+                    "page' when you want it closed. The address changes each time it's opened.")
+    unexpose()
+    return "The tunnel didn't come up in time - try again in a moment."
+
+
+def public_url() -> str:
+    """The outside address, while a tunnel is up."""
+    proc = _TUNNEL.get("proc")
+    return str(_TUNNEL.get("url") or "") if proc is not None and proc.poll() is None else ""
+
+
+def unexpose() -> str:
+    """Close the tunnel - the page goes back to being reachable only on your own wi-fi."""
+    proc = _TUNNEL.get("proc")
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+    handle = _TUNNEL.get("log")
+    if handle is not None:
+        try:
+            handle.close()
+        except OSError:
+            pass
+    was = bool(_TUNNEL.get("url"))
+    _TUNNEL.update(proc=None, url="", log=None)
+    return "Closed - the talk page is back to your wi-fi only." if was else "It wasn't shared."
+
+
+_ICON = None
+
+
+def icon_png() -> bytes:
+    """The home-screen icon: JARVIS's reactor, drawn once and kept in memory."""
+    global _ICON
+    if _ICON is not None:
+        return _ICON
+    try:
+        import cv2
+        import numpy as np
+
+        size = 180
+        img = np.zeros((size, size, 3), np.uint8)
+        img[:] = (13, 9, 7)
+        centre = (size // 2, size // 2)
+        for radius, colour, thick in ((78, (90, 60, 20), 6), (62, (221, 168, 41), 3),
+                                      (40, (255, 227, 143), 2)):
+            cv2.circle(img, centre, radius, colour, thick, cv2.LINE_AA)
+        cv2.circle(img, centre, 26, (255, 240, 200), -1, cv2.LINE_AA)
+        for angle in range(0, 360, 45):
+            rad = np.deg2rad(angle)
+            a = (int(centre[0] + 30 * np.cos(rad)), int(centre[1] + 30 * np.sin(rad)))
+            b = (int(centre[0] + 60 * np.cos(rad)), int(centre[1] + 60 * np.sin(rad)))
+            cv2.line(img, a, b, (221, 168, 41), 3, cv2.LINE_AA)
+        ok, buf = cv2.imencode(".png", img)
+        _ICON = buf.tobytes() if ok else b""
+    except Exception:
+        _ICON = b""
+    return _ICON
 
 
 def token_path():
@@ -372,6 +545,16 @@ class TalkServer:
                     return self._send(403, "Not for this device.")
                 if route in ("/", "/index.html"):
                     return self._send(200, PAGE, "text/html; charset=utf-8")
+                if route == "/manifest.webmanifest":
+                    start = f"/?k={server.secret}&call=1"
+                    body = json.dumps({"name": "JARVIS", "short_name": "JARVIS",
+                                       "start_url": start, "scope": "/", "display": "standalone",
+                                       "background_color": "#07090d", "theme_color": "#07090d",
+                                       "icons": [{"src": f"/icon.png?k={server.secret}",
+                                                  "sizes": "180x180", "type": "image/png"}]})
+                    return self._send(200, body, "application/manifest+json")
+                if route == "/icon.png":
+                    return self._send(200, icon_png(), "image/png")
                 if route.startswith("/audio/"):
                     data, kind = server.take_audio(route.rsplit("/", 1)[-1])
                     return self._send(200, data, kind) if data else self._send(404, "gone")
@@ -452,8 +635,9 @@ def start() -> str:
     url = _ACTIVE.start()
     return (f"Talk to me from your phone: {url}\n"
             "Same wi-fi as this Mac. Your phone will warn that the certificate isn't trusted - it's "
-            "this Mac's own; accept it once and the microphone works. Hold the button to talk, or "
-            "press Call to keep the line open.")
+            "this Mac's own; accept it once and the microphone works. Press Call and just talk.\n"
+            "Share > Add to Home Screen puts a JARVIS icon on your phone that opens straight into "
+            "a call.")
 
 
 def stop() -> str:
