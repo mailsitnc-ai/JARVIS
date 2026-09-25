@@ -29,7 +29,7 @@ SKILL = {
 
 _OFF = re.compile(r"\b(?:stop|close|disable|turn\s+off|switch\s+off|shut|end)\b", re.IGNORECASE)
 _OUTSIDE = re.compile(r"\b(?:outside|anywhere|away\s+from\s+home|out\s+of\s+the\s+house|tunnel|"
-                      r"not\s+at\s+home|mobile\s+data|publish|expose|share\s+the\s+talk\s+page)\b",
+                      r"not\s+at\s+home|mobile\s+data|publish|expose|shar(?:e|ing))\b",
                       re.IGNORECASE)
 _STOP_SHARING = re.compile(r"\b(?:stop|close|end|no\s+longer)\b[^.\n]*\b(?:shar\w+|tunnel|publish\w*|"
                            r"outside)\b", re.IGNORECASE)

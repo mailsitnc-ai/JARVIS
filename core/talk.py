@@ -733,12 +733,15 @@ def start() -> str:
 
 
 def stop() -> str:
+    """Close the page - and the tunnel with it: a public address pointing at a page that no longer
+    exists is worse than useless."""
     global _ACTIVE
+    shared = unexpose() if public_url() else ""
     if _ACTIVE is not None and _ACTIVE.running():
         _ACTIVE.stop()
         _ACTIVE = None
-        return "Talk page closed."
-    return "The talk page wasn't running."
+        return "Talk page closed." + (" " + shared if shared else "")
+    return "The talk page wasn't running." + (" " + shared if shared else "")
 
 
 def running() -> bool:
