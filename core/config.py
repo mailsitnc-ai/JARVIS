@@ -79,6 +79,26 @@ DEFAULTS: dict[str, Any] = {
         "jarvis_side": "right",
         "ipc_port": 47821,
     },
+    "remote": {
+        # JARVIS on your phone: it watches ONE WhatsApp chat and does what you send it there.
+        "enabled": False,
+        # Which chat - your own number opens the "Message yourself" chat, which only you can post in.
+        "chat": "",
+        # Only messages that start with "jarvis" (or "/") count as commands, so notes to yourself
+        # stay notes to yourself. Turn off if the chat is for JARVIS and nothing else.
+        "require_wake": True,
+        # Answer with a voice note as well as the text, like the bot in the video.
+        "voice_replies": True,
+        "poll_s": 3,
+    },
+    "talk": {
+        # The hold-to-talk page for your phone (core/talk.py): hold the button, speak, hear the
+        # answer. Keep host on 127.0.0.1 and reach it with `tailscale serve --bg 8765` - phones only
+        # allow the microphone on an https page, which Tailscale gives you for free.
+        "enabled": False,
+        "port": 8765,
+        "host": "127.0.0.1",
+    },
     "memory": {
         "max_interactions": 5000,
         "recall_k": 3,

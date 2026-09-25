@@ -103,6 +103,20 @@ _WA_CLICK_SEND_JS = ("(function(){var b=document.querySelector('button[aria-labe
                      "||document.querySelector('span[data-icon=\"send\"]');"
                      "if(!b)return false;(b.closest('button')||b).click();return true;})()")
 
+# The last messages of the open chat: id, direction, text, and whether it's a voice note.
+_WA_MESSAGES_JS = ("JSON.stringify(Array.prototype.slice.call("
+                   "document.querySelectorAll('#main div[role=\"row\"]')).slice(-%d).map(function(r){"
+                   "var b=r.querySelector('[data-id]');var pre=r.querySelector('[data-pre-plain-text]');"
+                   "var t=r.querySelector('span.selectable-text');"
+                   "return {id:b?b.getAttribute('data-id'):'',out:!!r.querySelector('.message-out'),"
+                   "audio:!!(r.querySelector('span[data-icon=\"audio-play\"]')"
+                   "||r.querySelector('button[aria-label*=\"Play\" i]')),"
+                   "meta:pre?pre.getAttribute('data-pre-plain-text'):'',"
+                   "text:t?t.innerText:''};}))")
+# The file input behind the paperclip - we hand it a file directly instead of clicking through menus.
+_WA_FILE_INPUT_JS = ("(function(){var i=document.querySelector('#main input[type=\"file\"]')"
+                     "||document.querySelector('input[type=\"file\"]');return !!i;})()")
+
 _GC_SEARCH_JS = ("(function(q){var el=document.querySelector('input[aria-label*=\"Search\" i]')"
                  "||document.querySelector('[role=textbox]')||document.querySelector('input');"
                  "if(!el)return false;el.focus();"
@@ -502,11 +516,17 @@ class ChromeController:
             if not chat:
                 return (f"I couldn't find a WhatsApp chat matching '{to}'. Say the name as it's saved in "
                         f"WhatsApp, or give the phone number.")
+        problem = self.whatsapp_type_send(message)
+        return f"I opened the chat with {chat} but {problem}" if problem else \
+            f"Sent the WhatsApp message to {chat}."
+
+    def whatsapp_type_send(self, message: str) -> str | None:
+        """Type a message into the chat that is ALREADY open and send it. Returns None, or what
+        went wrong. (whatsapp_send opens the right chat first; the phone channel is already in it.)"""
         if not self._wait_for(_WA_FOCUS_COMPOSE_JS, 10):
-            return f"I opened the chat with {chat} but couldn't find the message box."
-        lines = message.split("\n")
-        for i, line in enumerate(lines):  # Shift+Enter between lines; a bare Enter would send early
-            if i:
+            return "couldn't find the message box."
+        for i, line in enumerate(str(message).split("\n")):  # Shift+Enter between lines; a bare
+            if i:                                            # Enter would send half the message
                 self._cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter",
                                                      "modifiers": 8, "windowsVirtualKeyCode": 13})
                 self._cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter",
@@ -514,11 +534,74 @@ class ChromeController:
             if line:
                 self._cmd("Input.insertText", {"text": line})
         if not self._wait_for(_WA_SEND_READY_JS, 10):
-            return f"I typed the message to {chat} but WhatsApp's Send button never appeared."
+            return "WhatsApp's Send button never appeared."
         time.sleep(0.3)
         if not self.evaluate(_WA_CLICK_SEND_JS):
             self._key("Enter", 13)
-        return f"Sent the WhatsApp message to {chat}."
+        return None
+
+    def whatsapp_open(self, to: str) -> str:
+        """Open a chat (contact name, group name or phone number) and leave it open. Returns the chat
+        title, or a sentence explaining why not."""
+        self.ensure()
+        digits = re.sub(r"\D", "", to or "")
+        by_phone = bool(digits) and (str(to).strip().startswith("+") or len(digits) >= 8)
+        on_wa = self._use_tab("https://web.whatsapp.com")
+        self._prepare_whatsapp()
+        if by_phone:
+            self.navigate(f"https://web.whatsapp.com/send?phone={digits}", wait=30)
+        elif not (on_wa and self._wa_logged_in()):
+            self.navigate("https://web.whatsapp.com", wait=30)
+        self.evaluate(_WA_USE_HERE_JS)
+        if not self._wait_for(self._WA_LOGGED_IN_JS, 40):
+            return "WhatsApp Web isn't linked yet - say 'log in to WhatsApp' once and scan the QR."
+        if by_phone:
+            if not self._wait_for(_WA_FOCUS_COMPOSE_JS.replace("el.focus();return true", "return true"), 25):
+                return f"WhatsApp couldn't open a chat with {to} - is that number on WhatsApp?"
+            return self.evaluate(_WA_HEADER_JS) or to
+        return self._wa_open_chat(to) or f"I couldn't find a WhatsApp chat matching '{to}'."
+
+    def whatsapp_open_chat_title(self) -> str:
+        """Whose chat is open right now (empty when none is)."""
+        try:
+            return str(self.evaluate(_WA_HEADER_JS) or "")
+        except BrowserError:
+            return ""
+
+    def whatsapp_messages(self, limit: int = 12) -> list:
+        """The last messages of the open chat, oldest first: id, out (sent by this account), text,
+        audio (a voice note), meta (WhatsApp's own '[time, date] sender:' string)."""
+        raw = self.evaluate(_WA_MESSAGES_JS % int(limit))
+        try:
+            rows = json.loads(raw or "[]")
+        except ValueError:
+            return []
+        return [r for r in rows if isinstance(r, dict) and (r.get("id") or r.get("text"))]
+
+    def whatsapp_attach(self, path: str, caption: str = "") -> str | None:
+        """Send a file into the open chat. Returns None, or what went wrong."""
+        from pathlib import Path as _Path
+        full = str(_Path(path).expanduser().resolve())
+        if not _Path(full).is_file():
+            return f"there's no file at {path}."
+        self._cmd("DOM.enable")
+        doc = self._cmd("DOM.getDocument", {"depth": -1, "pierce": True})
+        node = self._cmd("DOM.querySelector", {"nodeId": doc["root"]["nodeId"],
+                                               "selector": "#main input[type=\"file\"]"})
+        node_id = node.get("nodeId") if isinstance(node, dict) else 0
+        if not node_id:
+            return "WhatsApp's file box isn't there (the layout may have changed)."
+        self._cmd("DOM.setFileInputFiles", {"files": [full], "nodeId": node_id})
+        if not self._wait_for(_WA_SEND_READY_JS, 15):
+            return "WhatsApp never showed the Send button for that file."
+        if caption:
+            self.evaluate(_WA_FOCUS_COMPOSE_JS)
+            self._cmd("Input.insertText", {"text": caption})
+        time.sleep(0.4)
+        if not self.evaluate(_WA_CLICK_SEND_JS):
+            self._key("Enter", 13)
+        time.sleep(0.6)
+        return None
 
     def chat_send(self, to: str, message: str) -> str:
         """Send a Google Chat message via chat.google.com. Best-effort DOM automation; needs Chat signed

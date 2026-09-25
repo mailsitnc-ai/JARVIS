@@ -284,9 +284,43 @@ class JarvisPanel:
                            speak=self._say)
         except Exception as exc:
             self.events.put(("event", f"Alerts unavailable: {exc}"))
+        try:   # JARVIS on your phone: answer WhatsApp messages you send yourself
+            from core import remote
+            remote.configure(self._phone_ask,
+                             emit=lambda text: self.events.put(("event", f"📱 {text}")),
+                             settings=self.settings)
+            if self.settings.get("remote.enabled", False):
+                self.events.put(("event", remote.start()))
+        except Exception as exc:
+            self.events.put(("event", f"Phone control unavailable: {exc}"))
+        try:   # hold-to-talk page, so you can talk to JARVIS from the phone
+            from core import talk
+            talk.configure(self._phone_ask,
+                           emit=lambda text: self.events.put(("event", f"📱 {text}")),
+                           settings=self.settings)
+            if self.settings.get("talk.enabled", False):
+                self.events.put(("event", talk.start()))
+        except Exception as exc:
+            self.events.put(("event", f"Talk page unavailable: {exc}"))
+
+    def _phone_ask(self, text: str) -> str:
+        """Run a request that arrived from the phone and hand back the words to send back."""
+        reply, job = self.jarvis.submit(text)
+        if job is not None:            # a new skill has to be built: the phone can wait for it
+            reply = job()
+        answer = getattr(reply, "text", str(reply))
+        self.events.put(("event", f"📱 → {answer}"))
+        return answer
 
     def _confirm_action(self, req) -> str:
         """Called on a worker thread: ask the panel to show approval buttons, then block for the answer."""
+        try:
+            from core import remote
+            channel = remote.current()       # this request came from your phone: ask there, not here
+            if channel is not None:
+                return channel.confirm(req)
+        except Exception:
+            pass
         box = {"decision": "deny"}
         answered = threading.Event()
         self.events.put(("confirm", (req, box, answered)))
