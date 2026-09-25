@@ -180,7 +180,9 @@ class TunnelTests(IsolatedCase):
 
         class FakeProc:
             def __init__(self, *args, **kwargs):
+                import os
                 self.args = args[0] if args else []
+                self.pid = os.getpid()        # a pid that really is alive, like a real tunnel's
                 handle = kwargs.get("stdout")
                 if not dies and handle is not None:
                     handle.write(f"INF |  {url}  |\n")

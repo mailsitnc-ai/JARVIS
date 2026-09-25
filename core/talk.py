@@ -291,6 +291,39 @@ DOWNLOAD = ("https://github.com/cloudflare/cloudflared/releases/latest/download/
 _TUNNEL: dict = {"proc": None, "url": "", "log": None}
 
 
+def _tunnel_file() -> Path:
+    from core import oslayer
+    return Path(oslayer.user_data_dir()) / "talk_tunnel.json"
+
+
+def _remember_tunnel(url: str, pid: int) -> None:
+    """Keep the address on disk as well as in memory, so 'where's the talk page' can still answer
+    it later - and so a tunnel left running can be found and closed."""
+    try:
+        _tunnel_file().write_text(json.dumps({"url": url, "pid": int(pid)}))
+    except OSError:
+        pass
+
+
+def _remembered() -> tuple[str, int]:
+    try:
+        saved = json.loads(_tunnel_file().read_text())
+        return str(saved.get("url") or ""), int(saved.get("pid") or 0)
+    except (OSError, ValueError, TypeError):
+        return "", 0
+
+
+def _alive(pid: int) -> bool:
+    import os
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
 def tunnel_cli() -> str | None:
     """Where the tunnel program is, if it's here."""
     import shutil
@@ -351,6 +384,7 @@ def expose(port: int = PORT, secret: str | None = None, wait: float = 40.0) -> s
         found = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", log.read_text(errors="ignore"))
         if found:
             _TUNNEL["url"] = f"{found.group(0)}/?k={secret or token()}&call=1"
+            _remember_tunnel(_TUNNEL["url"], proc.pid)
             return (f"You can call me from anywhere now: {_TUNNEL['url']}\n"
                     "Real certificate, so no warning - add it to your home screen. Anyone with that "
                     "exact link could talk to me, so keep it to yourself; say 'stop sharing the talk "
@@ -360,13 +394,27 @@ def expose(port: int = PORT, secret: str | None = None, wait: float = 40.0) -> s
 
 
 def public_url() -> str:
-    """The outside address, while a tunnel is up."""
+    """The outside address, while a tunnel is up - from memory, or from what was saved."""
     proc = _TUNNEL.get("proc")
-    return str(_TUNNEL.get("url") or "") if proc is not None and proc.poll() is None else ""
+    if proc is not None and proc.poll() is None and _TUNNEL.get("url"):
+        return str(_TUNNEL["url"])
+    url, pid = _remembered()
+    if url and _alive(pid):
+        return url                 # a tunnel from before JARVIS restarted is still ours
+    if url:
+        try:
+            _tunnel_file().unlink(missing_ok=True)      # it died: don't hand out a dead address
+        except OSError:
+            pass
+    return ""
 
 
 def unexpose() -> str:
     """Close the tunnel - the page goes back to being reachable only on your own wi-fi."""
+    import os
+    import signal
+
+    was = bool(public_url())
     proc = _TUNNEL.get("proc")
     if proc is not None and proc.poll() is None:
         proc.terminate()
@@ -374,13 +422,23 @@ def unexpose() -> str:
             proc.wait(timeout=5)
         except Exception:
             proc.kill()
+    else:
+        _url, pid = _remembered()     # started before a restart: still ours to close
+        if _alive(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+    try:
+        _tunnel_file().unlink(missing_ok=True)
+    except OSError:
+        pass
     handle = _TUNNEL.get("log")
     if handle is not None:
         try:
             handle.close()
         except OSError:
             pass
-    was = bool(_TUNNEL.get("url"))
     _TUNNEL.update(proc=None, url="", log=None)
     return "Closed - the talk page is back to your wi-fi only." if was else "It wasn't shared."
 
