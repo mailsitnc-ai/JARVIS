@@ -165,6 +165,31 @@ class SecurePageTests(IsolatedCase):
         self.assertIn("127.0.0.1", text)
 
 
+class CallerWaitingTests(unittest.TestCase):
+    """Someone on the phone can't click a permission box on the Mac - so nothing may block on one."""
+
+    def test_the_thread_answering_a_call_is_marked_as_such(self):
+        from core import talk
+        seen = []
+        server = TalkServer(lambda text: seen.append(talk.on_a_call()) or "done",
+                            transcribe=lambda raw: "what is the time", voice=False, port=0)
+        self.assertFalse(talk.on_a_call())
+        server.answer(b"x" * 4000)
+        self.assertEqual(seen, [True])          # the skill runs knowing it's a call
+        self.assertFalse(talk.on_a_call())      # and the mark is cleared afterwards
+
+    def test_the_mark_is_cleared_even_when_the_skill_blows_up(self):
+        from core import talk
+
+        def boom(_text):
+            raise RuntimeError("no")
+
+        server = TalkServer(boom, transcribe=lambda raw: "hello", voice=False, port=0)
+        with self.assertRaises(RuntimeError):
+            server.answer(b"x" * 4000)
+        self.assertFalse(talk.on_a_call())
+
+
 class TunnelTests(IsolatedCase):
     """Calling JARVIS from outside: one outbound tunnel publishing just this page - not a VPN."""
 

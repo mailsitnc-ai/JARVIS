@@ -199,10 +199,24 @@ function stop() {
 }
 
 async function ask(blob) {
-  if (!blob || blob.size < 2000) return null;
-  state.textContent = 'thinking...';
-  const res = await fetch('/ask?k=' + encodeURIComponent(token), {method: 'POST', body: blob});
-  return await res.json();
+  if (!blob) { state.textContent = 'the microphone gave nothing back'; return null; }
+  if (blob.size < 2000) { state.textContent = "didn't catch that - say a bit more"; return null; }
+  state.textContent = 'thinking (' + Math.round(blob.size / 1024) + ' KB sent)...';
+  /* Never wait forever: if the Mac doesn't answer, say so and let the next turn happen. */
+  const bail = new AbortController();
+  const timer = setTimeout(() => bail.abort(), 45000);
+  try {
+    const res = await fetch('/ask?k=' + encodeURIComponent(token),
+                            {method: 'POST', body: blob, signal: bail.signal});
+    if (!res.ok) { say('jarvis', 'the Mac said no (' + res.status + ')'); return null; }
+    return await res.json();
+  } catch (e) {
+    say('jarvis', e.name === 'AbortError' ? 'no answer from the Mac after 45 seconds'
+                                          : 'could not reach the Mac: ' + e.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function play(url) {
@@ -246,6 +260,9 @@ async function conversation() {
 }
 
 call.addEventListener('click', async () => {
+  if (call.dataset.busy === '1') return;      // a second tap while it's starting used to re-announce
+  call.dataset.busy = '1';
+  setTimeout(() => { call.dataset.busy = '0'; }, 600);
   onCall = !onCall;
   call.classList.toggle('on', onCall);
   call.textContent = onCall ? 'End call' : 'Call';
@@ -289,6 +306,13 @@ CLOUDFLARED = Path.home() / "bin" / "cloudflared"
 DOWNLOAD = ("https://github.com/cloudflare/cloudflared/releases/latest/download/"
             "cloudflared-darwin-{arch}.tgz")
 _TUNNEL: dict = {"proc": None, "url": "", "log": None}
+_LOCAL = threading.local()
+
+
+def on_a_call() -> bool:
+    """Is this thread answering someone on the phone? They can't click a button on the Mac, so a
+    request that needs approval must be refused straight away instead of leaving them on hold."""
+    return bool(getattr(_LOCAL, "calling", False))
 
 
 def _tunnel_file() -> Path:
@@ -540,18 +564,27 @@ class TalkServer:
 
     def answer(self, raw: bytes) -> dict:
         """Audio in, answer out - the whole turn, with no HTTP in sight (so it can be tested)."""
+        started = time.monotonic()
+        self.emit(f"call: {len(raw) // 1024} KB of audio from the phone")
         heard = ""
         try:
             heard = str(self.transcribe(raw) or "").strip()
         except Exception as exc:
+            self.emit(f"call: couldn't read the audio - {exc}")
             return {"error": f"I couldn't make out the audio: {exc}"}
+        self.emit(f"call: heard {heard!r} in {time.monotonic() - started:.1f}s")
         if not heard:
             return {"heard": "", "text": "I didn't catch that, sir."}
         from core.voice import parse_wake
         _, stripped = parse_wake(heard)           # "Jarvis, ..." is optional here - you pressed talk
         request = stripped or heard
         self.emit(f"phone: {request}")
-        reply = str(self.ask(request) or "").strip() or "Done, sir."
+        _LOCAL.calling = True
+        try:
+            reply = str(self.ask(request) or "").strip() or "Done, sir."
+        finally:
+            _LOCAL.calling = False
+        self.emit(f"call: answered in {time.monotonic() - started:.1f}s")
         out = {"heard": heard, "text": reply}
         if self.voice:
             from core import speechfile
@@ -628,6 +661,7 @@ class TalkServer:
                     return self._send(400, "no audio")
                 if length > 4 * MAX_AUDIO:
                     return self._send(413, "that's far too much audio")
+                server.emit(f"call: receiving {length // 1024} KB")
                 raw = self.rfile.read(length)   # read it all, then judge: cutting the phone off
                 if len(raw) > MAX_AUDIO:        # mid-upload just looks like a broken connection
                     return self._send(413, "that's too much audio")

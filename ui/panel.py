@@ -326,6 +326,15 @@ class JarvisPanel:
                 return channel.confirm(req)
         except Exception:
             pass
+        try:
+            from core import talk
+            if talk.on_a_call():
+                # Someone is on the line. They can't press a button here, and waiting three minutes
+                # for one is how a call ends up frozen on "thinking...".
+                log.info("call: refused %s (needs approval on the Mac)", getattr(req, "summary", req))
+                return "deny"
+        except Exception:
+            pass
         box = {"decision": "deny"}
         answered = threading.Event()
         self.events.put(("confirm", (req, box, answered)))
