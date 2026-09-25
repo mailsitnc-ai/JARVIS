@@ -286,11 +286,15 @@ class JarvisPanel:
             self.events.put(("event", f"Alerts unavailable: {exc}"))
         try:   # JARVIS on your phone: answer WhatsApp messages you send yourself
             from core import remote
-            remote.configure(self._phone_ask,
-                             emit=lambda text: self.events.put(("event", f"📱 {text}")),
-                             settings=self.settings)
+            def phone_event(text):       # also to daemon.log, so a phone problem can be diagnosed
+                log.info("phone: %s", text)
+                self.events.put(("event", f"📱 {text}"))
+
+            remote.configure(self._phone_ask, emit=phone_event, settings=self.settings)
             if self.settings.get("remote.enabled", False):
-                self.events.put(("event", remote.start()))
+                started = remote.start()
+                log.info("phone: %s", started)
+                self.events.put(("event", started))
         except Exception as exc:
             self.events.put(("event", f"Phone control unavailable: {exc}"))
         try:   # hold-to-talk page, so you can talk to JARVIS from the phone
@@ -309,6 +313,7 @@ class JarvisPanel:
         if job is not None:            # a new skill has to be built: the phone can wait for it
             reply = job()
         answer = getattr(reply, "text", str(reply))
+        log.info("phone request: %s -> %s", text, answer[:200])
         self.events.put(("event", f"📱 → {answer}"))
         return answer
 
@@ -386,6 +391,7 @@ class JarvisPanel:
                         self._set_reactor("idle")
                 elif kind == "reply":
                     self.busy = False  # free the input; a background build keeps running on its own thread
+                    log.info("reply[%s]: %s", payload.route, (payload.text or "")[:160])
                     if payload.route == "building":
                         self._write(f"  · {payload.text}\n", "event")  # reactor stays "busy" while it builds
                     else:
@@ -407,6 +413,8 @@ class JarvisPanel:
                         self._write("  · Nothing running to interrupt.\n", "event")
                 elif kind == "voice":
                     self._on_voice(payload)
+                elif kind == "run":
+                    self._on_terminal(payload)
                 elif kind == "voice_state":
                     state, detail = payload
                     log.info("voice: %s %s", state, detail or "")
@@ -525,6 +533,22 @@ class JarvisPanel:
         self.busy = True
         self._set_reactor("busy")
         threading.Thread(target=self._work, args=(text, True), name="jarvis-voice-request", daemon=True).start()
+
+    def _on_terminal(self, text: str) -> None:
+        """A request handed to the RUNNING JARVIS from the terminal (`jarvis do "..."`), so it lands
+        in this session - with its browser, its voice and whatever it's already watching."""
+        if self.jarvis is None:
+            self._write("Still starting up, one moment.\n", "event")
+            return
+        if self.busy:
+            self._write("  · Busy with the last request - try again in a moment.\n", "event")
+            return
+        self._write("You ⌨  ", "label")
+        self._write(f"{text}\n", "user")
+        self.busy = True
+        self._set_reactor("busy")
+        threading.Thread(target=self._work, args=(text,), name="jarvis-terminal-request",
+                         daemon=True).start()
 
     def _recall(self, step: int):
         if not self.history:
@@ -928,7 +952,14 @@ def run_daemon(show: bool = False) -> int:
         panel.events.put(("event", f"Interrupt shortcut unavailable: {interrupt_hotkey.error}"))
 
     def on_command(command: str) -> dict:
-        command = command.strip().lower()
+        command = command.strip()
+        if command[:4].lower() in ("run ", "ask ", "do  ") or command[:3].lower() == "do ":
+            request = command.split(" ", 1)[1].strip()
+            if not request:
+                return {"ok": False, "error": "nothing to run"}
+            panel.events.put(("run", request))
+            return {"ok": True, "queued": request}
+        command = command.lower()
         if command == "ping":
             return {"ok": True, "pid": os.getpid(), "visible": panel.visible, "hotkey_error": hotkey.error}
         if command in ("toggle", "show"):

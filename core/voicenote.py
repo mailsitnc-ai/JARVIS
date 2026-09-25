@@ -14,11 +14,19 @@ import threading
 import uuid
 from pathlib import Path
 
-# Play the newest voice note (WhatsApp only creates the <audio> element once you press play) and
-# hand back the audio bytes. Returns "" until the blob exists, so the caller can retry.
-PLAY_JS = ("(function(){var b=Array.prototype.slice.call(document.querySelectorAll("
-           "'#main button[aria-label*=\"Play\" i], #main span[data-icon=\"audio-play\"]'));"
-           "if(!b.length)return false;var t=b[b.length-1];(t.closest('button')||t).click();return true;})()")
+# WhatsApp only builds the <audio> element once the note has actually been played, and it ignores
+# a JS click - so the play button is pressed through the browser layer, like a person would.
+# The play control is a DIV in some builds and a BUTTON in others, and the bubble around it is
+# labelled "Audio playback" - so look for the most specific label first and only then fall back.
+PLAY_SELECTORS = ['#main [aria-label="Play voice message"]',
+                  '#main [data-icon="audio-play"]',
+                  '#main button[aria-label*="Play" i]']
+LAST_PLAY_JS = ("(function(sels){for(var i=0;i<sels.length;i++){"
+                "var b=document.querySelectorAll(sels[i]);if(!b.length)continue;"
+                "var e=b[b.length-1];e=e.closest('button,div[role=\"button\"]')||e;"
+                "e.setAttribute('data-jarvis-target','1');return sels[i];}return false;})(%s)")
+READY_JS = ("(function(){var a=document.querySelectorAll('#main audio');"
+            "return a.length ? (a[a.length-1].src||'').slice(0,5) : '';})()")
 PAUSE_JS = ("(function(){var a=document.querySelectorAll('#main audio');"
             "for(var i=0;i<a.length;i++){try{a[i].pause();a[i].currentTime=0;}catch(e){}}return true;})()")
 GRAB_JS = ("(async function(){var a=document.querySelectorAll('#main audio');"
@@ -55,11 +63,13 @@ def model(name: str = "base.en"):
     return _MODEL
 
 
-def audio_bytes(controller, tries: int = 12, pause: float = 0.4) -> bytes:
+def audio_bytes(controller, tries: int = 15, pause: float = 0.4) -> bytes:
     """Press play on the newest voice note and take the audio out of the page."""
+    import json
     import time
 
-    controller.evaluate(PLAY_JS)
+    if controller.evaluate(LAST_PLAY_JS % json.dumps(PLAY_SELECTORS)):
+        controller._press_tagged()          # a real press: WhatsApp ignores a scripted click
     data = ""
     for _ in range(tries):
         time.sleep(pause)

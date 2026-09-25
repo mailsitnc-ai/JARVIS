@@ -16,6 +16,7 @@ SKILL = {
                    "talk page', 'close the talk page', 'where's the talk page'.",
     "triggers": [
         r"\btalk\s+page\b|\bhold[\s-]to[\s-]talk\b",
+        r"\b(?:start|open|launch|bring\s+up|close|stop)\b[^.\n]*\btalk\s+page\b",
         r"\b(?:talk|speak)\s+to\s+(?:you|jarvis)\b[^.\n]*\b(?:from|on)\s+(?:my\s+)?phone\b",
         r"\b(?:phone|mobile)\s+(?:mic|microphone|voice)\b",
         r"\b(?:call|ring)\s+(?:you|jarvis)\b[^.\n]*\bphone\b",

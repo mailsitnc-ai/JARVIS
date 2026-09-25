@@ -16,11 +16,15 @@ SKILL = {
     "description": "Let JARVIS answer WhatsApp messages you send from your phone and do what they "
                    "say, e.g. 'watch my whatsapp', 'watch my whatsapp +91 97700 94860', 'stop "
                    "watching whatsapp', 'is phone control on'.",
+    # The whatsapp SENDING skill matches any mention of WhatsApp twice, and the registry ranks by how
+    # many triggers matched - so watching the chat needs to match more of these than that does.
     "triggers": [
-        r"\b(?:watch|monitor|read|check|answer|reply\s+to)\b[^.\n]*\b(?:my\s+)?whats\s?app\b",
+        r"\b(?:watch|watching|monitor|monitoring|read|answer|reply\s+to)\b[^.\n]*\bwhats\s?app\b",
+        r"\b(?:watch|watching|monitor|monitoring)\s+(?:my\s+|the\s+)?whats\s?app\b",
+        r"\bwhats\s?app\b[^.\n]*\b(?:watch|control|bot|channel|assistant)\b|"
+        r"\b(?:watch|control)\b[^.\n]*\bwhats\s?app\b",
         r"\b(?:phone|mobile|remote)\s+control\b|\bcontrol\b[^.\n]*\bfrom\s+my\s+phone\b",
         r"\bjarvis\s+on\s+(?:my\s+)?phone\b|\bwhats\s?app\s+(?:bot|assistant|channel)\b",
-        r"\bstop\b[^.\n]*\bwhats\s?app\b[^.\n]*\b(?:watch|control|bot)\b|"
         r"\bstop\s+watching\s+(?:my\s+)?whats\s?app\b",
     ],
     "version": 1,

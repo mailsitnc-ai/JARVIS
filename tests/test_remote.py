@@ -91,6 +91,7 @@ class ChannelTests(unittest.TestCase):
         self.fake = FakeWhatsApp(history=["jarvis this is old and must not run"])
         self.channel = PhoneChannel(self.answer, "Message yourself", controller=self.fake,
                                     voice=False, poll=0.05)
+        self.channel.SNAPSHOT_WAIT = 0.4
         self.addCleanup(self.channel.stop)
 
     def answer(self, text):
@@ -200,6 +201,108 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(self.asked, [])
 
 
+class BacklogTests(unittest.TestCase):
+    """The bug from the first live run: starting up answered a message sent an hour earlier."""
+
+    def test_the_timestamp_on_a_bubble_is_read(self):
+        from core.remote import message_time
+        when = message_time("[1:57 pm, 25/9/2026] Shivam G: ")
+        self.assertEqual((when.hour, when.minute, when.day, when.month), (13, 57, 25, 9))
+        self.assertEqual(message_time("[11:05 am, 1/1/2026] x:").hour, 11)
+        self.assertEqual(message_time("[12:30 am, 1/1/2026] x:").hour, 0)      # midnight, not noon
+        self.assertEqual(message_time("[12:30 pm, 1/1/2026] x:").hour, 12)
+        self.assertIsNone(message_time("something else"))
+        self.assertIsNone(message_time(""))
+
+    def test_a_message_from_before_we_started_is_not_run(self):
+        import datetime as dt
+        fake = FakeWhatsApp()
+        channel = PhoneChannel(lambda text: "ran it", "Message yourself", controller=fake,
+                               voice=False, poll=0.05)
+        channel.SNAPSHOT_WAIT = 0.4
+        self.addCleanup(channel.stop)
+        channel.start()
+        yesterday = dt.datetime.now() - dt.timedelta(days=1)
+        fake.rows.append({"id": "old1", "out": True, "audio": False, "text": "jarvis delete everything",
+                          "meta": yesterday.strftime("[%I:%M %p, %-d/%-m/%Y] Shivam G:").lower()})
+        time.sleep(0.4)
+        self.assertEqual(fake.sent, [])
+
+    def test_the_chat_is_read_only_once_whatsapp_has_drawn_it(self):
+        """The real failure: the page was still loading, so nothing was marked as already-seen."""
+        fake = FakeWhatsApp(history=["jarvis an old request"])
+        empty_reads = [0]
+        real_messages = fake.whatsapp_messages
+
+        def slow(limit=12):
+            empty_reads[0] += 1
+            return [] if empty_reads[0] < 3 else real_messages(limit)
+
+        fake.whatsapp_messages = slow
+        channel = PhoneChannel(lambda text: "ran it", "Message yourself", controller=fake,
+                               voice=False, poll=0.05)
+        channel.SNAPSHOT_WAIT = 4.0
+        self.addCleanup(channel.stop)
+        channel.start()
+        time.sleep(0.5)
+        self.assertEqual(fake.sent, [])            # it waited, saw the history, and left it alone
+
+
+class FollowUpTests(unittest.TestCase):
+    """From the live log: JARVIS asked "what should the message say?" and the answer was ignored
+    because it didn't start with "jarvis"."""
+
+    def setUp(self):
+        self.fake = FakeWhatsApp()
+        self.asked = []
+        self.replies = iter(["What would you like it to say?", "Sent it."])
+        self.channel = PhoneChannel(self.answer, "Message yourself", controller=self.fake,
+                                    voice=False, poll=0.05)
+        self.channel.SNAPSHOT_WAIT = 0.4
+        self.addCleanup(self.channel.stop)
+
+    def answer(self, text):
+        self.asked.append(text)
+        return next(self.replies, "done")
+
+    def test_answering_a_question_needs_no_wake_word(self):
+        self.channel.start()
+        self.fake.phone_says("jarvis whatsapp om")
+        self.assertTrue(wait_for(lambda: any("like it to say" in m for m in self.fake.sent)))
+        self.fake.phone_says("can we hoop today")          # no "jarvis" - it's an answer
+        self.assertTrue(wait_for(lambda: len(self.asked) > 1))
+        self.assertEqual(self.asked[1], "can we hoop today")
+
+    def test_the_message_after_that_needs_the_wake_word_again(self):
+        self.channel.start()
+        self.fake.phone_says("jarvis whatsapp om")
+        self.assertTrue(wait_for(lambda: self.fake.sent))
+        self.fake.phone_says("can we hoop today")
+        self.assertTrue(wait_for(lambda: len(self.asked) > 1))
+        self.fake.phone_says("note to self: buy milk")     # not an answer, not addressed to JARVIS
+        time.sleep(0.3)
+        self.assertEqual(len(self.asked), 2)
+
+
+class OwnWordsTests(unittest.TestCase):
+    """WhatsApp renders our robot-face marker as an IMAGE, so the text alone can't prove it's ours."""
+
+    def test_the_marker_survives_being_turned_into_a_picture(self):
+        fake = FakeWhatsApp()
+        channel = PhoneChannel(lambda text: "reply", "Message yourself", controller=fake,
+                               voice=False, poll=0.05)
+        channel.say("Jarvis here, battery is 94%")
+        stripped = " Jarvis here, battery is 94%"      # what the page gives back, emoji gone
+        self.assertTrue(channel._is_ours(stripped))
+        self.assertFalse(channel._is_ours("jarvis what's my battery"))
+
+    def test_close_enough_counts(self):
+        from core.remote import same_words
+        self.assertTrue(same_words("\U0001f916 Battery: 94%.", "Battery: 94%"))
+        self.assertFalse(same_words("Battery: 94%", "Battery: 12%"))
+        self.assertFalse(same_words("", ""))
+
+
 class RiskTests(unittest.TestCase):
     """Commands from the phone that can't be taken back are checked first, whatever autonomy says."""
 
@@ -241,6 +344,7 @@ class VoiceNoteTests(unittest.TestCase):
         fake = FakeWhatsApp()
         channel = PhoneChannel(lambda text: f"done: {text}", "Message yourself", controller=fake,
                                voice=False, poll=0.05)
+        channel.SNAPSHOT_WAIT = 0.4
         channel._transcribe = lambda message: "jarvis what's my battery"
         self.addCleanup(channel.stop)
         channel.start()
@@ -252,6 +356,7 @@ class VoiceNoteTests(unittest.TestCase):
         fake = FakeWhatsApp()
         channel = PhoneChannel(lambda text: "should not run", "Message yourself", controller=fake,
                                voice=False, poll=0.05)
+        channel.SNAPSHOT_WAIT = 0.4
         self.addCleanup(channel.stop)
         import core.voicenote as voicenote
         original = voicenote.transcribe

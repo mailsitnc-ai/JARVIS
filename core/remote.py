@@ -17,6 +17,8 @@ through the browser, not a cloud bot.
 """
 from __future__ import annotations
 
+import collections
+import datetime as dt
 import queue
 import re
 import threading
@@ -56,7 +58,33 @@ def risk(command: str) -> str | None:
             return why
     return None
 
+# WhatsApp stamps every bubble with "[1:57 pm, 25/9/2026] Name:" - the only way to tell a message
+# that arrived just now from one that was already sitting in the chat.
+STAMP = re.compile(r"\[(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap])\.?m\.?,\s*(\d{1,2})/(\d{1,2})/(\d{4})\]",
+                   re.IGNORECASE)
+
 _LOCAL = threading.local()
+
+
+def message_time(meta: str):
+    """When WhatsApp says this message was sent, or None if the stamp isn't one we know."""
+    match = STAMP.search(str(meta or ""))
+    if not match:
+        return None
+    hour, minute, second, half, day, month, year = match.groups()
+    hour, minute = int(hour), int(minute)
+    if half:
+        hour = hour % 12 + (12 if half.lower() == "p" else 0)
+    try:
+        return dt.datetime(int(year), int(month), int(day), hour, minute, int(second or 0))
+    except ValueError:
+        return None
+
+
+def same_words(a: str, b: str) -> bool:
+    """Two messages that read the same once WhatsApp has had its way with emoji and spacing."""
+    clean = lambda t: re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", str(t or "").lower())).strip()[:160]
+    return bool(clean(a)) and clean(a) == clean(b)
 
 
 def command_in(text: str, require_wake: bool = True) -> str | None:
@@ -101,6 +129,7 @@ class PhoneChannel:
     POLL = 3.0                # seconds between looks at the chat
     HISTORY = 14              # how many of the last messages we re-read each time
     CONFIRM_WAIT = 180.0      # how long to wait for a "yes" before giving up
+    SNAPSHOT_WAIT = 15.0      # how long to let WhatsApp draw the chat before reading it
     MAX_REPLY = 3500          # WhatsApp's message limit is bigger, but nobody reads more than this
 
     def __init__(self, ask, chat: str, emit=None, controller=None, require_wake: bool = True,
@@ -113,6 +142,9 @@ class PhoneChannel:
         self.voice = bool(voice)
         self.poll = float(poll or self.POLL)
         self.seen = set()
+        self.started = None        # messages older than this were already in the chat when we arrived
+        self.ours = collections.deque(maxlen=40)   # what we've said, so we never answer ourselves
+        self.expecting = False     # our last reply asked YOU something, so the next message is the answer
         self.preapproved = False   # you already said yes to this one request; don't ask twice
         self.inbox = queue.Queue()
         self.error = None
@@ -132,7 +164,8 @@ class PhoneChannel:
         opened = self.controller.whatsapp_open(self.chat)
         if not opened or opened.lower().startswith(("i couldn't", "whatsapp")):
             return opened or f"I couldn't open the WhatsApp chat '{self.chat}'."
-        self.seen = {m.get("id") for m in self._read()}      # history is not a backlog of orders
+        self.started = dt.datetime.now()
+        self.seen = self._snapshot()          # the history is not a backlog of orders
         self._stop.clear()
         self._threads = [threading.Thread(target=self._watch, daemon=True),
                          threading.Thread(target=self._work, daemon=True)]
@@ -151,6 +184,18 @@ class PhoneChannel:
         return any(t.is_alive() for t in self._threads) and not self._stop.is_set()
 
     # ---- the chat ------------------------------------------------------------------------------
+    def _snapshot(self, wait: float | None = None) -> set:
+        """Everything already in the chat, marked seen. WhatsApp can take a few seconds to draw the
+        conversation after it opens, and reading too early once made JARVIS answer a message from
+        an hour before."""
+        deadline = time.monotonic() + (self.SNAPSHOT_WAIT if wait is None else wait)
+        while time.monotonic() < deadline and not self._stop.is_set():
+            rows = self._read()
+            if rows:
+                return {row.get("id") for row in rows}
+            time.sleep(0.5)
+        return set()
+
     def _read(self):
         try:
             return self.controller.whatsapp_messages(self.HISTORY)
@@ -164,6 +209,8 @@ class PhoneChannel:
             title = self.controller.whatsapp_open_chat_title()
             if title and (title == self.chat or self._same_chat(title)):
                 return True
+            if not title:
+                return True        # still drawing - don't reload the page underneath ourselves
             opened = self.controller.whatsapp_open(self.chat)
             return bool(opened) and not opened.lower().startswith(("i couldn't", "whatsapp web isn't"))
         except Exception as exc:
@@ -180,6 +227,10 @@ class PhoneChannel:
         body = str(text or "").strip()
         if not body:
             return
+        self.ours.append(body)     # WhatsApp turns our marker emoji into an image, so the text alone
+                                   # can't prove a message is ours - remember what we said instead
+        # "Which doc, sir?" - you shouldn't have to write "jarvis" again to answer a question.
+        self.expecting = body.rstrip().endswith("?")
         if len(body) > self.MAX_REPLY:
             body = body[:self.MAX_REPLY] + "\n... (trimmed)"
         marked = body if body.startswith(MARK) else f"{MARK} {body}"
@@ -236,13 +287,25 @@ class PhoneChannel:
                 self.emit(f"Phone request failed: {exc}")
                 self.say(f"That went wrong on my end, sir: {exc}")
 
+    def _is_ours(self, text: str) -> bool:
+        return str(text or "").lstrip().startswith(MARK) or any(same_words(text, mine) for mine in self.ours)
+
+    def _too_old(self, message) -> bool:
+        """Was this sitting in the chat before JARVIS started watching?"""
+        when = message_time(message.get("meta"))
+        return bool(when and self.started and when < self.started - dt.timedelta(minutes=2))
+
     def _handle(self, message) -> None:
         text = str(message.get("text") or "")
+        if self._is_ours(text) or self._too_old(message):
+            return
         if message.get("audio") and not text.strip():
             text = self._transcribe(message)
             if not text:
                 return
-        command = command_in(text, self.require_wake)
+        answering = self.expecting          # a reply to JARVIS's own question needs no wake word
+        command = command_in(text, self.require_wake and not answering)
+        self.expecting = False
         if not command:
             return
         self.emit(f"WhatsApp: {command}")
@@ -289,7 +352,7 @@ class PhoneChannel:
             except queue.Empty:
                 continue
             answer = str(message.get("text") or "")
-            if answer.startswith(MARK):
+            if self._is_ours(answer) or self._too_old(message):
                 continue
             body = command_in(answer, require_wake=False) or answer
             choice = decision(body)

@@ -66,6 +66,23 @@ def cmd_ask(args) -> int:
     return 0
 
 
+def cmd_do(args) -> int:
+    """Hand a request to the JARVIS that's already running, so it lands in that session - the one
+    with the browser open, the voice listening and whatever it's watching."""
+    from window_manager import ipc
+
+    request = " ".join(args.text).strip()
+    reply = ipc.send(f"run {request}")
+    if reply is None:
+        print("JARVIS isn't running - start it (open JARVIS.app) or use `jarvis ask` for a one-off.")
+        return 1
+    if not reply.get("ok"):
+        print(f"JARVIS: {reply.get('error', 'command failed')}")
+        return 1
+    print(f"Sent to JARVIS: {request}\n(the answer appears in the JARVIS panel)")
+    return 0
+
+
 def cmd_chat(_args) -> int:
     from .orchestrator import Jarvis
 
@@ -752,6 +769,10 @@ def build_parser() -> argparse.ArgumentParser:
     ask = sub.add_parser("ask", help="one request, answered in the terminal")
     ask.add_argument("text", nargs="+")
     ask.set_defaults(func=cmd_ask, force=False)
+
+    do = sub.add_parser("do", help="give the RUNNING JARVIS a request (answered in its panel)")
+    do.add_argument("text", nargs="+")
+    do.set_defaults(func=cmd_do)
 
     evolve = sub.add_parser("evolve", help="build a new skill for this request even if one seems to match")
     evolve.add_argument("text", nargs="+")

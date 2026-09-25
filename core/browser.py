@@ -97,11 +97,16 @@ _WA_FOCUS_COMPOSE_JS = ("(function(){var el=document.querySelector('#main footer
 # "WhatsApp is open in another window" -> click "Use here" so this tab takes over.
 _WA_USE_HERE_JS = ("(function(){var b=Array.prototype.slice.call(document.querySelectorAll('button,div[role=button]'))"
                    ".find(function(e){return /use here/i.test(e.innerText||'')});if(b){b.click();return true}return false})()")
-_WA_SEND_READY_JS = ("!!(document.querySelector('button[aria-label=\"Send\"]')"
-                     "||document.querySelector('span[data-icon=\"send\"]'))")
-_WA_CLICK_SEND_JS = ("(function(){var b=document.querySelector('button[aria-label=\"Send\"]')"
-                     "||document.querySelector('span[data-icon=\"send\"]');"
-                     "if(!b)return false;(b.closest('button')||b).click();return true;})()")
+# WhatsApp keeps renaming this: plain "Send" in a chat, "Send 2 selected" on a file preview, and
+# the icon went from data-icon="send" to "wds-ic-send-filled".
+# In a chat it's a <button aria-label="Send">; on a file preview it's a DIV labelled
+# "Send 2 selected" wrapped round a wds-ic-send-filled icon, which can't take keyboard focus.
+_WA_SEND_SELECTOR = ('button[aria-label^="Send"],div[role="button"][aria-label^="Send"],'
+                     'span[data-icon="send"],[data-icon="wds-ic-send-filled"]')
+_WA_SEND_READY_JS = f"!!document.querySelector({_WA_SEND_SELECTOR!r})"
+_WA_CLICK_SEND_JS = ("(function(){var b=document.querySelector(%r);"
+                     "if(!b)return false;(b.closest('button')||b).click();return true;})()"
+                     % _WA_SEND_SELECTOR)
 
 # The last messages of the open chat: id, direction, text, and whether it's a voice note.
 _WA_MESSAGES_JS = ("JSON.stringify(Array.prototype.slice.call("
@@ -113,9 +118,43 @@ _WA_MESSAGES_JS = ("JSON.stringify(Array.prototype.slice.call("
                    "||r.querySelector('button[aria-label*=\"Play\" i]')),"
                    "meta:pre?pre.getAttribute('data-pre-plain-text'):'',"
                    "text:t?t.innerText:''};}))")
-# The file input behind the paperclip - we hand it a file directly instead of clicking through menus.
-_WA_FILE_INPUT_JS = ("(function(){var i=document.querySelector('#main input[type=\"file\"]')"
-                     "||document.querySelector('input[type=\"file\"]');return !!i;})()")
+# Attaching a file: WhatsApp only creates the right <input> once you have really clicked the
+# paperclip and then the menu item (it ignores synthetic clicks), so we need both their positions.
+_WA_POINT_JS = ("JSON.stringify((function(sel){var e=document.querySelector(sel);if(!e)return null;"
+                "var r=e.getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2];})(%s))")
+_WA_MENU_POINT_JS = ("JSON.stringify((function(label){var items=Array.prototype.slice.call("
+                     "document.querySelectorAll('[role=\"menuitem\"],[role=\"menu\"] button,"
+                     "[role=\"application\"] li,li,div[role=\"button\"]'));"
+                     "var el=items.find(function(e){return ((e.innerText||'').trim().toLowerCase())"
+                     ".indexOf(label)===0});if(!el)return null;var r=el.getBoundingClientRect();"
+                     "return [r.x+r.width/2,r.y+r.height/2];})(%s))")
+# Clicking at coordinates is fragile in WhatsApp's layout - another element often sits over the
+# button. Tagging the element we want and then FOCUSING it lets us press it with the keyboard, which
+# needs no hit-testing at all.
+_WA_TAG_BUTTON_JS = ("(function(sel){var e=document.querySelector(sel);if(!e)return false;"
+                     "e=e.closest('button,div[role=\"button\"]')||e;"   # an icon can't take focus
+                     "e.setAttribute('data-jarvis-target','1');return true;})(%s)")
+_WA_TAG_MENU_JS = ("(function(label){var items=Array.prototype.slice.call(document.querySelectorAll("
+                   "'[role=\"menuitem\"],[role=\"menu\"] button,li,div[role=\"button\"]'));"
+                   "var el=items.find(function(e){return ((e.innerText||'').trim().toLowerCase())"
+                   ".indexOf(label)===0});if(!el)return false;"
+                   "el.setAttribute('data-jarvis-target','1');return true;})(%s)")
+_WA_UNTAG_JS = ("(function(){var e=document.querySelector('[data-jarvis-target]');"
+                "if(e)e.removeAttribute('data-jarvis-target');return true;})()")
+# Where the tagged element is, and whether a click there would actually reach it (WhatsApp often
+# draws something over the footer, and then clicking those coordinates does nothing at all).
+_WA_SCROLL_TO_TARGET_JS = ("(function(){var e=document.querySelector('[data-jarvis-target]');"
+                           "if(!e)return false;e.scrollIntoView({block:'center'});return true;})()")
+_WA_TARGET_POINT_JS = ("JSON.stringify((function(){var e=document.querySelector('[data-jarvis-target]');"
+                       "if(!e)return null;var r=e.getBoundingClientRect();"
+                       "var x=r.x+r.width/2,y=r.y+r.height/2;var at=document.elementFromPoint(x,y);"
+                       "var onscreen=r.width>0&&r.height>0&&y>0&&y<window.innerHeight&&x>0&&"
+                       "x<window.innerWidth;"
+                       "return [x,y,!!(onscreen&&at&&(at===e||e.contains(at)||at.contains(e)||"
+                       "(e.compareDocumentPosition(at)&16)||at.closest('[data-jarvis-target]')))];})())")
+# The document input accepts anything; the one that is always there only takes images.
+_WA_DOC_INPUT_JS = ("JSON.stringify(Array.prototype.slice.call(document.querySelectorAll("
+                    "'input[type=\"file\"]')).map(function(i){return i.getAttribute('accept')||'*'}))")
 
 _GC_SEARCH_JS = ("(function(q){var el=document.querySelector('input[aria-label*=\"Search\" i]')"
                  "||document.querySelector('[role=textbox]')||document.querySelector('input');"
@@ -578,30 +617,119 @@ class ChromeController:
             return []
         return [r for r in rows if isinstance(r, dict) and (r.get("id") or r.get("text"))]
 
+    def press_element(self, selector: str) -> bool:
+        """Press the first element matching this CSS selector, the way a person would. WhatsApp
+        ignores JS .click(), so this is a real click - or, where something is drawn over the spot,
+        keyboard focus and Enter."""
+        return self._wa_press(_WA_TAG_BUTTON_JS % json.dumps(selector))
+
+    def _press_tagged(self) -> bool:
+        """Press the tagged element: a real click when that spot really is clickable, otherwise
+        focus + Enter, which needs no coordinates. WhatsApp needs both - its send button is a DIV
+        that can't take focus, and its paperclip usually has something drawn over it."""
+        # Scroll to it FIRST and let the scroll finish: measuring in the same breath gives the
+        # position the element had before it moved, and the click then lands on empty chat.
+        self.evaluate(_WA_SCROLL_TO_TARGET_JS)
+        time.sleep(0.4)
+        point = json.loads(self.evaluate(_WA_TARGET_POINT_JS) or "null")
+        if point and point[2]:
+            self.click_at(point[0], point[1])
+            self.evaluate(_WA_UNTAG_JS)
+            return True
+        if point and 0 < point[1] < 2000:
+            # On screen, but something else answers for that spot - click it anyway: in WhatsApp the
+            # thing on top is usually a wrapper that passes the click on to the button underneath.
+            self.click_at(point[0], point[1])
+        try:
+            self._cmd("DOM.enable")
+            doc = self._cmd("DOM.getDocument", {"depth": -1, "pierce": True})
+            node = self._cmd("DOM.querySelector", {"nodeId": doc["root"]["nodeId"],
+                                                   "selector": "[data-jarvis-target]"})
+            node_id = node.get("nodeId") if isinstance(node, dict) else 0
+            if not node_id:
+                return False
+            self._cmd("DOM.focus", {"nodeId": node_id})
+        except BrowserError:
+            return False
+        # Enter only presses a focused button when the event carries its TEXT - without "\r" Chrome
+        # delivers the key but performs no default action, and nothing happens.
+        self._cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter",
+                                             "text": "\r", "windowsVirtualKeyCode": 13,
+                                             "nativeVirtualKeyCode": 13})
+        self._cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter",
+                                             "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13})
+        self.evaluate(_WA_UNTAG_JS)
+        return True
+
+    def _wa_press(self, finder_js: str) -> bool:
+        """Press the element that `finder_js` (a tagging script) points at."""
+        if not self.evaluate(finder_js):
+            return False
+        return self._press_tagged()
+
+    def _wa_menu_item(self, label: str, tries: int = 8, pause: float = 0.25):
+        """Where the menu entry with this label is, once it appears (None if it never does)."""
+        for attempt in range(max(1, tries)):
+            if attempt:
+                time.sleep(pause)
+            point = json.loads(self.evaluate(_WA_MENU_POINT_JS % json.dumps(label)) or "null")
+            if point:
+                return point
+        return None
+
     def whatsapp_attach(self, path: str, caption: str = "") -> str | None:
-        """Send a file into the open chat. Returns None, or what went wrong."""
+        """Send a file into the chat that's already open. Returns None, or what went wrong.
+
+        WhatsApp builds the file input only after a REAL click on the paperclip and then on
+        "Document" - a synthetic click does nothing at all, and the input that's always in the page
+        only takes images."""
         from pathlib import Path as _Path
         full = str(_Path(path).expanduser().resolve())
         if not _Path(full).is_file():
             return f"there's no file at {path}."
-        self._cmd("DOM.enable")
-        doc = self._cmd("DOM.getDocument", {"depth": -1, "pierce": True})
-        node = self._cmd("DOM.querySelector", {"nodeId": doc["root"]["nodeId"],
-                                               "selector": "#main input[type=\"file\"]"})
-        node_id = node.get("nodeId") if isinstance(node, dict) else 0
+        # The paperclip TOGGLES the menu, so a press can just as easily close one that was left
+        # open: look first, and press again if the menu isn't there.
+        open_menu = bool(self._wa_menu_item("document", tries=1))
+        for _ in range(2):
+            if open_menu:
+                break
+            if not self._wa_press(_WA_TAG_BUTTON_JS % json.dumps('#main footer button[aria-label="Attach"]')):
+                return "I couldn't find WhatsApp's attach button."
+            open_menu = bool(self._wa_menu_item("document", tries=8))
+        if not open_menu:
+            return "WhatsApp's attach menu didn't open."
+        if not self._wa_press(_WA_TAG_MENU_JS % json.dumps("document")):
+            return "WhatsApp's attach menu has no 'Document' entry."
+        node_id, deadline = 0, time.monotonic() + 6
+        while time.monotonic() < deadline and not node_id:
+            time.sleep(0.25)
+            accepts = json.loads(self.evaluate(_WA_DOC_INPUT_JS) or "[]")
+            index = next((i for i, a in enumerate(accepts) if "image" not in (a or "")), None)
+            if index is None:
+                continue
+            self._cmd("DOM.enable")
+            doc = self._cmd("DOM.getDocument", {"depth": -1, "pierce": True})
+            nodes = self._cmd("DOM.querySelectorAll", {"nodeId": doc["root"]["nodeId"],
+                                                       "selector": 'input[type="file"]'})
+            ids = nodes.get("nodeIds") or []
+            node_id = ids[index] if index < len(ids) else 0
         if not node_id:
-            return "WhatsApp's file box isn't there (the layout may have changed)."
+            return "WhatsApp never offered a file box for that attachment."
         self._cmd("DOM.setFileInputFiles", {"files": [full], "nodeId": node_id})
-        if not self._wait_for(_WA_SEND_READY_JS, 15):
+        if not self._wait_for(_WA_SEND_READY_JS, 20):
+            # Escape is NOT the way out of here - it opens a "Discard selection?" box on top.
             return "WhatsApp never showed the Send button for that file."
         if caption:
             self.evaluate(_WA_FOCUS_COMPOSE_JS)
             self._cmd("Input.insertText", {"text": caption})
-        time.sleep(0.4)
-        if not self.evaluate(_WA_CLICK_SEND_JS):
-            self._key("Enter", 13)
-        time.sleep(0.6)
-        return None
+        time.sleep(0.5)
+        for _ in range(2):              # the preview closing again is how we know it really went
+            self._wa_press(_WA_TAG_BUTTON_JS % json.dumps(_WA_SEND_SELECTOR))
+            for _ in range(10):
+                time.sleep(0.4)
+                if not self.evaluate(_WA_SEND_READY_JS):
+                    return None
+        return "WhatsApp kept the file in its preview instead of sending it."
 
     def chat_send(self, to: str, message: str) -> str:
         """Send a Google Chat message via chat.google.com. Best-effort DOM automation; needs Chat signed
