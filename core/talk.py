@@ -150,7 +150,7 @@ if ('serviceWorker' in navigator) {        // see WORKER above: skips ngrok's wa
 const params = new URLSearchParams(location.search);
 const token = params.get('k') || '';
 document.getElementById('mf').href = '/manifest.webmanifest?k=' + encodeURIComponent(token);
-document.getElementById('ic').href = '/icon.png?k=' + encodeURIComponent(token);
+document.getElementById('ic').href = '/icon-192.png?k=' + encodeURIComponent(token);
 const log = document.getElementById('log'), state = document.getElementById('state');
 const talk = document.getElementById('talk'), call = document.getElementById('call');
 let stream = null, recorder = null, onCall = false, busy = false, wakeLock = null;
@@ -545,36 +545,39 @@ def unexpose() -> str:
     return "Closed - the talk page is back to your wi-fi only." if was else "It wasn't shared."
 
 
-_ICON = None
+# Android will only install a page as an app if the manifest offers a 192px AND a 512px icon, so
+# the reactor is drawn at whatever size is asked for.
+ICON_SIZES = (180, 192, 512)
+_ICONS: dict = {}
 
 
-def icon_png() -> bytes:
-    """The home-screen icon: JARVIS's reactor, drawn once and kept in memory."""
-    global _ICON
-    if _ICON is not None:
-        return _ICON
+def icon_png(size: int = 192) -> bytes:
+    """The home-screen icon: JARVIS's reactor, drawn once per size and kept in memory."""
+    size = int(size)
+    if size in _ICONS:
+        return _ICONS[size]
     try:
         import cv2
         import numpy as np
 
-        size = 180
+        unit = size / 180.0
         img = np.zeros((size, size, 3), np.uint8)
         img[:] = (13, 9, 7)
         centre = (size // 2, size // 2)
         for radius, colour, thick in ((78, (90, 60, 20), 6), (62, (221, 168, 41), 3),
                                       (40, (255, 227, 143), 2)):
-            cv2.circle(img, centre, radius, colour, thick, cv2.LINE_AA)
-        cv2.circle(img, centre, 26, (255, 240, 200), -1, cv2.LINE_AA)
+            cv2.circle(img, centre, int(radius * unit), colour, max(1, int(thick * unit)), cv2.LINE_AA)
+        cv2.circle(img, centre, int(26 * unit), (255, 240, 200), -1, cv2.LINE_AA)
         for angle in range(0, 360, 45):
             rad = np.deg2rad(angle)
-            a = (int(centre[0] + 30 * np.cos(rad)), int(centre[1] + 30 * np.sin(rad)))
-            b = (int(centre[0] + 60 * np.cos(rad)), int(centre[1] + 60 * np.sin(rad)))
-            cv2.line(img, a, b, (221, 168, 41), 3, cv2.LINE_AA)
+            a = (int(centre[0] + 30 * unit * np.cos(rad)), int(centre[1] + 30 * unit * np.sin(rad)))
+            b = (int(centre[0] + 60 * unit * np.cos(rad)), int(centre[1] + 60 * unit * np.sin(rad)))
+            cv2.line(img, a, b, (221, 168, 41), max(1, int(3 * unit)), cv2.LINE_AA)
         ok, buf = cv2.imencode(".png", img)
-        _ICON = buf.tobytes() if ok else b""
+        _ICONS[size] = buf.tobytes() if ok else b""
     except Exception:
-        _ICON = b""
-    return _ICON
+        _ICONS[size] = b""
+    return _ICONS[size]
 
 
 def token_path():
@@ -716,14 +719,18 @@ class TalkServer:
                     return self._send(200, PAGE, "text/html; charset=utf-8")
                 if route == "/manifest.webmanifest":
                     start = f"/?k={server.secret}&call=1"
-                    body = json.dumps({"name": "JARVIS", "short_name": "JARVIS",
-                                       "start_url": start, "scope": "/", "display": "standalone",
+                    icons = [{"src": f"/icon-{size}.png?k={server.secret}",
+                              "sizes": f"{size}x{size}", "type": "image/png",
+                              "purpose": "any maskable"} for size in (192, 512)]
+                    body = json.dumps({"id": "jarvis-call", "name": "JARVIS", "short_name": "JARVIS",
+                                       "description": "Talk to JARVIS", "start_url": start,
+                                       "scope": "/", "display": "standalone", "orientation": "portrait",
                                        "background_color": "#07090d", "theme_color": "#07090d",
-                                       "icons": [{"src": f"/icon.png?k={server.secret}",
-                                                  "sizes": "180x180", "type": "image/png"}]})
+                                       "prefer_related_applications": False, "icons": icons})
                     return self._send(200, body, "application/manifest+json")
-                if route == "/icon.png":
-                    return self._send(200, icon_png(), "image/png")
+                if route.startswith("/icon"):
+                    asked = "".join(ch for ch in route if ch.isdigit())
+                    return self._send(200, icon_png(int(asked or 192)), "image/png")
                 if route == "/sw.js":
                     return self._send(200, WORKER, "application/javascript")
                 if route.startswith("/audio/"):

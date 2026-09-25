@@ -121,7 +121,6 @@ class HomeScreenTests(IsolatedCase):
         self.assertEqual(manifest["short_name"], "JARVIS")
         self.assertEqual(manifest["display"], "standalone")
         self.assertIn("call=1", manifest["start_url"])         # the icon dials straight in
-        self.assertIn("icon.png", manifest["icons"][0]["src"])
 
     def test_the_page_brings_a_worker_that_skips_the_warning_page(self):
         status, body = get(f"{self.base}/sw.js?k=test-secret")
@@ -130,10 +129,19 @@ class HomeScreenTests(IsolatedCase):
         page = get(f"{self.base}/?k=test-secret")[1]
         self.assertIn(b"serviceWorker.register", page)
 
-    def test_there_is_an_icon(self):
-        status, body = get(f"{self.base}/icon.png?k=test-secret")
-        self.assertEqual(status, 200)
-        self.assertTrue(body.startswith(b"\x89PNG"), "not a PNG")
+    def test_the_icons_android_insists_on_are_there(self):
+        """Chrome refuses to install an app without a 192px AND a 512px icon - and it only says
+        "this app cannot be installed", never why."""
+        manifest = json.loads(get(f"{self.base}/manifest.webmanifest?k=test-secret")[1])
+        sizes = {icon["sizes"] for icon in manifest["icons"]}
+        self.assertIn("192x192", sizes)
+        self.assertIn("512x512", sizes)
+        for icon in manifest["icons"]:
+            status, body = get(f"{self.base}{icon['src']}")
+            self.assertEqual(status, 200, icon["src"])
+            self.assertTrue(body.startswith(b"\x89PNG"), icon["src"])
+            self.assertEqual(icon["type"], "image/png")
+        self.assertFalse(manifest["prefer_related_applications"])
 
     def test_the_call_link_shows_the_connect_tap(self):
         status, body = get(f"{self.base}/?k=test-secret&call=1")
