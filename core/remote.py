@@ -147,6 +147,10 @@ class PhoneChannel:
         self.expecting = False     # our last reply asked YOU something, so the next message is the answer
         self.working = threading.Event()   # a request is using the browser: the watcher keeps off
         self.voice_fails = 0
+        self.outbox = []           # replies that couldn't be delivered yet (Chrome was away)
+        self.last_revive = 0.0     # when we last tried to bring Chrome back
+        self.away = False          # Chrome/WhatsApp is currently unreachable
+        self.blank_rounds = 0      # polls in a row with no chat on screen
         self.preapproved = False   # you already said yes to this one request; don't ask twice
         self.inbox = queue.Queue()
         self.error = None
@@ -205,19 +209,59 @@ class PhoneChannel:
             self.error = str(exc)
             return []
 
+    REVIVE_EVERY = 20.0        # seconds between attempts to bring Chrome back
+
     def _ensure_chat(self) -> bool:
-        """Keep our chat open - sending a message to someone else navigates away from it."""
+        """Keep our chat open and reachable. You shouldn't have to keep Chrome running for this:
+        if it has been quit, crashed, or the tab was closed, JARVIS starts it again itself."""
         try:
+            if not self.controller.alive():         # Chrome has been quit or has crashed
+                return self._revive()
             title = self.controller.whatsapp_open_chat_title()
             if title and (title == self.chat or self._same_chat(title)):
-                return True
+                self.blank_rounds = 0
+                return self._back()
             if not title:
-                return True        # still drawing - don't reload the page underneath ourselves
+                self.blank_rounds += 1
+                if self.blank_rounds < 3:
+                    return False       # give the page a moment to draw before reloading it
+            self.blank_rounds = 0
             opened = self.controller.whatsapp_open(self.chat)
-            return bool(opened) and not opened.lower().startswith(("i couldn't", "whatsapp web isn't"))
+            ok = bool(opened) and not opened.lower().startswith(("i couldn't", "whatsapp web isn't"))
+            return self._back() if ok else self._revive()
         except Exception as exc:
             self.error = str(exc)
+            return self._revive()
+
+    def _revive(self) -> bool:
+        """Chrome isn't answering: start it (JARVIS's own, with the linked WhatsApp) and re-open
+        the chat. Tried on a timer so a machine with no Chrome doesn't spin."""
+        if not self.away:
+            self.away = True
+            self.emit("WhatsApp is out of reach (Chrome isn't running) - bringing it back.")
+        if time.monotonic() - self.last_revive < self.REVIVE_EVERY:
             return False
+        self.last_revive = time.monotonic()
+        try:
+            self.controller.close()
+            self.controller.ensure()          # launches JARVIS's own Chrome if there isn't one
+            opened = self.controller.whatsapp_open(self.chat)
+            if opened and not opened.lower().startswith(("i couldn't", "whatsapp web isn't")):
+                return self._back()
+            self.error = opened
+        except Exception as exc:
+            self.error = str(exc)
+        return False
+
+    def _back(self) -> bool:
+        """We can see the chat again - say so once, and deliver anything that was waiting."""
+        if self.away:
+            self.away = False
+            self.emit("WhatsApp is back - I'm watching your chat again.")
+        while self.outbox:
+            waiting = self.outbox.pop(0)
+            self.say(waiting)
+        return True
 
     def _on_our_chat(self) -> bool:
         """Only ever take orders from YOUR chat - never from whatever conversation happens to be
@@ -248,10 +292,16 @@ class PhoneChannel:
         self.last_reply = marked
         try:
             problem = self.controller.whatsapp_type_send(marked)
-            if problem:
-                self.emit(f"WhatsApp reply failed: {problem}")
         except Exception as exc:
-            self.emit(f"WhatsApp reply failed: {exc}")
+            problem = str(exc)
+        if problem:
+            # Don't lose the answer because Chrome went away mid-reply: hold it and send it when
+            # the chat comes back.
+            self.emit(f"WhatsApp reply failed ({problem}) - holding it until the chat is back.")
+            if len(self.outbox) < 10 and body not in self.outbox:
+                self.outbox.append(body)
+            self.away = True
+            return
         if self.voice and (voice is not False):
             self._voice_note(body)
             self._forget_our_media()

@@ -18,20 +18,30 @@ class FakeWhatsApp:
         self.title = "Message yourself"
         self.lock = threading.Lock()
         self.opened = 0
+        self.dead = False            # Chrome quit / crashed
+        self.launched = 0            # how many times JARVIS started it again
 
     # -- the bits PhoneChannel uses --
     def whatsapp_open(self, chat):
+        if self.dead:
+            raise RuntimeError("lost the connection to Chrome")
         self.opened += 1
         return self.title
 
     def whatsapp_open_chat_title(self):
+        if self.dead:
+            raise RuntimeError("lost the connection to Chrome")
         return self.title
 
     def whatsapp_messages(self, limit=12):
+        if self.dead:
+            raise RuntimeError("lost the connection to Chrome")
         with self.lock:
             return [dict(row) for row in self.rows[-limit:]]
 
     def whatsapp_type_send(self, message):
+        if self.dead:
+            return "couldn't find the message box."
         with self.lock:
             self.sent.append(message)
             self.rows.append({"id": f"s{len(self.rows)}", "out": True, "audio": False,
@@ -41,6 +51,18 @@ class FakeWhatsApp:
     def whatsapp_attach(self, path, caption=""):
         self.attached.append(path)
         return None
+
+    # -- what a dead Chrome looks like --
+    def alive(self):
+        return not self.dead
+
+    def ensure(self):
+        if self.dead:
+            self.launched += 1
+            self.dead = False        # JARVIS started Chrome again
+
+    def close(self):
+        pass
 
     # -- the test's side --
     def phone_says(self, text, audio=False):
@@ -301,6 +323,48 @@ class OwnWordsTests(unittest.TestCase):
         self.assertTrue(same_words("\U0001f916 Battery: 94%.", "Battery: 94%"))
         self.assertFalse(same_words("Battery: 94%", "Battery: 12%"))
         self.assertFalse(same_words("", ""))
+
+
+class ChromeGoesAwayTests(unittest.TestCase):
+    """You shouldn't have to keep Chrome running: if it's quit or crashed, JARVIS brings it back."""
+
+    def setUp(self):
+        self.fake = FakeWhatsApp()
+        self.asked = []
+        self.notes = []
+        self.channel = PhoneChannel(lambda text: self.asked.append(text) or f"done: {text}",
+                                    "Message yourself", controller=self.fake, voice=False,
+                                    poll=0.05, emit=self.notes.append)
+        self.channel.SNAPSHOT_WAIT = 0.4
+        self.channel.REVIVE_EVERY = 0.2
+        self.addCleanup(self.channel.stop)
+        self.channel.start()
+
+    def test_chrome_is_started_again_by_itself(self):
+        self.fake.dead = True
+        self.assertTrue(wait_for(lambda: self.fake.launched >= 1), "Chrome was never restarted")
+        self.assertTrue(any("bringing it back" in n for n in self.notes))
+        self.fake.phone_says("jarvis what is the time")
+        self.assertTrue(wait_for(lambda: self.asked), "it never started watching again")
+        self.assertTrue(any("back" in n for n in self.notes))
+
+    def test_a_message_sent_while_chrome_was_down_is_still_answered(self):
+        self.fake.dead = True
+        self.fake.rows.append({"id": "while-down", "out": True, "audio": False,
+                               "text": "jarvis what is the time", "meta": ""})
+        self.assertTrue(wait_for(lambda: self.asked, timeout=6))
+        self.assertEqual(self.asked, ["what is the time"])
+
+    def test_an_answer_is_held_and_delivered_when_the_chat_comes_back(self):
+        self.fake.phone_says("jarvis first question")
+        self.assertTrue(wait_for(lambda: self.fake.sent))
+        self.fake.sent.clear()
+        self.fake.dead = True
+        self.channel.say("here is your answer")           # can't get out right now
+        self.assertIn("here is your answer", self.channel.outbox)
+        self.assertTrue(wait_for(lambda: any("here is your answer" in m for m in self.fake.sent),
+                                 timeout=6), "the held answer never arrived")
+        self.assertEqual(self.channel.outbox, [])
 
 
 class SafetyTests(unittest.TestCase):

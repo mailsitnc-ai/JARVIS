@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -206,6 +207,11 @@ class ChromeController:
         except (OSError, ValueError):
             return None
 
+    def alive(self) -> bool:
+        """Is a debuggable Chrome actually running right now? (A page that is merely slow to draw
+        must not be mistaken for a browser that has been quit.)"""
+        return self._version() is not None
+
     def ensure(self) -> None:
         """Make sure a debuggable Chrome is running, launching JARVIS's own if needed. Raises BrowserError."""
         if self._version() is not None:
@@ -219,9 +225,16 @@ class ChromeController:
             from .oslayer import user_data_dir
             profile = str(user_data_dir() / "chrome-debug")
         Path(profile).mkdir(parents=True, exist_ok=True)
-        args = [exe, f"--remote-debugging-port={self.port}", f"--user-data-dir={profile}",
-                "--remote-allow-origins=*",  # newer Chrome blocks DevTools websockets otherwise
-                "--no-first-run", "--no-default-browser-check", "--start-maximized", "about:blank"]
+        flags = [f"--remote-debugging-port={self.port}", f"--user-data-dir={profile}",
+                 "--remote-allow-origins=*",  # newer Chrome blocks DevTools websockets otherwise
+                 "--no-first-run", "--no-default-browser-check", "--start-maximized", "about:blank"]
+        bundle = re.sub(r"(\.app)/Contents/MacOS/.*$", r"\1", exe)
+        if sys.platform == "darwin" and bundle.endswith(".app"):
+            # `open -g` starts it in the BACKGROUND: JARVIS keeps its own Chrome running for things
+            # like the phone channel, and that must never jump in front of what you're doing.
+            args = ["open", "-g", "-n", "-a", bundle, "--args"] + flags
+        else:
+            args = [exe] + flags
         try:
             subprocess.Popen(args, creationflags=_NO_WINDOW, close_fds=True)
         except OSError as exc:
