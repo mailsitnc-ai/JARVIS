@@ -395,6 +395,26 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(self.fake.sent, [])
 
 
+class NotifyTests(unittest.TestCase):
+    """Other parts of JARVIS (like the call page) can drop a line into your own chat."""
+
+    def test_a_note_goes_into_the_chat(self):
+        fake = FakeWhatsApp()
+        channel = PhoneChannel(lambda text: "x", "Message yourself", controller=fake, voice=False,
+                               poll=0.05)
+        channel.SNAPSHOT_WAIT = 0.4
+        self.addCleanup(channel.stop)
+        channel.start()
+        remote._ACTIVE = channel
+        self.addCleanup(lambda: setattr(remote, "_ACTIVE", None))
+        self.assertTrue(remote.notify("Call me from anywhere: https://example.test"))
+        self.assertTrue(any("example.test" in m for m in fake.sent))
+
+    def test_it_says_no_when_nothing_is_watching(self):
+        remote._ACTIVE = None
+        self.assertFalse(remote.notify("nobody to tell"))
+
+
 class ChromeGoesAwayTests(unittest.TestCase):
     """You shouldn't have to keep Chrome running: if it's quit or crashed, JARVIS brings it back."""
 

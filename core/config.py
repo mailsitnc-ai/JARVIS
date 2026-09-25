@@ -101,6 +101,9 @@ DEFAULTS: dict[str, Any] = {
         "host": "0.0.0.0",
         # Phones only allow the microphone on https, so JARVIS serves it with its own certificate.
         "https": True,
+        # Also publish it through a tunnel at startup, so you can call from outside the house. The
+        # address changes each time, so JARVIS messages you the new one on WhatsApp.
+        "outside": False,
     },
     "memory": {
         "max_interactions": 5000,

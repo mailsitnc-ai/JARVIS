@@ -556,6 +556,18 @@ def active() -> PhoneChannel | None:
     return _ACTIVE if running() else None
 
 
+def notify(text: str) -> bool:
+    """Put a line in your own WhatsApp chat (used to send you the current call link). True if sent."""
+    channel = active()
+    if channel is None:
+        return False
+    try:
+        channel.say(text, voice=False)
+    except Exception:
+        return False
+    return True
+
+
 def status() -> str:
     if not running():
         return "Phone control is off. Say 'watch my whatsapp' to have me answer messages from your phone."

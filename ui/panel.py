@@ -306,8 +306,27 @@ class JarvisPanel:
                            settings=self.settings)
             if self.settings.get("talk.enabled", False):
                 self.events.put(("event", talk.start()))
+                if self.settings.get("talk.outside", False):
+                    threading.Thread(target=self._share_talk_page, name="jarvis-talk-share",
+                                     daemon=True).start()
         except Exception as exc:
             self.events.put(("event", f"Talk page unavailable: {exc}"))
+
+    def _share_talk_page(self) -> None:
+        """Publish the call page and WhatsApp you the address - it's a new one each time, so the
+        newest message in your own chat is always the link that works."""
+        from core import remote, talk
+        answer = talk.expose(getattr(talk._ACTIVE, "port", talk.PORT),
+                             getattr(talk._ACTIVE, "secret", None))
+        log.info("talk: %s", answer.splitlines()[0] if answer else "")
+        self.events.put(("event", f"📞 {answer}"))
+        link = talk.public_url()
+        if not link:
+            return
+        for _ in range(10):        # the phone channel may still be waking up
+            if remote.notify(f"Call me from anywhere: {link}"):
+                return
+            time.sleep(15)
 
     def _keep_phone_watching(self, attempts: int = 5, gap: float = 30.0) -> None:
         """Start watching your WhatsApp, trying again if the browser wasn't ready yet."""
