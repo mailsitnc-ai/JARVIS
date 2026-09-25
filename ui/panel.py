@@ -292,9 +292,11 @@ class JarvisPanel:
 
             remote.configure(self._phone_ask, emit=phone_event, settings=self.settings)
             if self.settings.get("remote.enabled", False):
-                started = remote.start()
-                log.info("phone: %s", started)
-                self.events.put(("event", started))
+                # On its own thread, and retried: at boot Chrome may not be up yet, and starting it
+                # can take half a minute - which used to hold up everything after this, and left
+                # the channel silently off if that first go didn't work.
+                threading.Thread(target=self._keep_phone_watching, name="jarvis-phone-start",
+                                 daemon=True).start()
         except Exception as exc:
             self.events.put(("event", f"Phone control unavailable: {exc}"))
         try:   # hold-to-talk page, so you can talk to JARVIS from the phone
@@ -306,6 +308,22 @@ class JarvisPanel:
                 self.events.put(("event", talk.start()))
         except Exception as exc:
             self.events.put(("event", f"Talk page unavailable: {exc}"))
+
+    def _keep_phone_watching(self, attempts: int = 5, gap: float = 30.0) -> None:
+        """Start watching your WhatsApp, trying again if the browser wasn't ready yet."""
+        from core import remote
+        for attempt in range(attempts):
+            try:
+                answer = remote.start()
+            except Exception as exc:
+                answer = f"Phone control failed to start: {exc}"
+            log.info("phone: %s", answer)
+            self.events.put(("event", f"📱 {answer}"))
+            if remote.running():
+                return
+            time.sleep(gap)
+        self.events.put(("event", "📱 I couldn't start watching WhatsApp - say 'watch my whatsapp' "
+                                  "to try again."))
 
     def _phone_ask(self, text: str) -> str:
         """Run a request that arrived from the phone and hand back the words to send back."""
