@@ -123,6 +123,13 @@ class HomeScreenTests(IsolatedCase):
         self.assertIn("call=1", manifest["start_url"])         # the icon dials straight in
         self.assertIn("icon.png", manifest["icons"][0]["src"])
 
+    def test_the_page_brings_a_worker_that_skips_the_warning_page(self):
+        status, body = get(f"{self.base}/sw.js?k=test-secret")
+        self.assertEqual(status, 200)
+        self.assertIn(b"ngrok-skip-browser-warning", body)
+        page = get(f"{self.base}/?k=test-secret")[1]
+        self.assertIn(b"serviceWorker.register", page)
+
     def test_there_is_an_icon(self):
         status, body = get(f"{self.base}/icon.png?k=test-secret")
         self.assertEqual(status, 200)

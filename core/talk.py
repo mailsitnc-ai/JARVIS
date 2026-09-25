@@ -75,6 +75,21 @@ def certificate(ip: str | None = None):
         return None, None
     return cert, key
 
+WORKER = """/* Re-ask for every page with the header that skips ngrok's free-tier warning, so the
+   icon on your phone opens straight into JARVIS instead of an interstitial. */
+self.addEventListener('install', e => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+self.addEventListener('fetch', event => {
+  const req = event.request;
+  if (req.method !== 'GET' || !req.url.startsWith(self.location.origin)) return;
+  event.respondWith(fetch(new Request(req, {
+    headers: new Headers([...req.headers.entries(), ['ngrok-skip-browser-warning', 'jarvis']]),
+    mode: req.mode === 'navigate' ? 'same-origin' : req.mode,
+    redirect: 'follow'
+  })).catch(() => fetch(req)));
+});
+"""
+
 PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -129,6 +144,9 @@ PAGE = """<!DOCTYPE html>
   </footer>
   <div id="connect"><div class="ring"></div><p>tap anywhere to connect</p></div>
 <script>
+if ('serviceWorker' in navigator) {        // see WORKER above: skips ngrok's warning page
+  navigator.serviceWorker.register('/sw.js' + location.search).catch(() => {});
+}
 const params = new URLSearchParams(location.search);
 const token = params.get('k') || '';
 document.getElementById('mf').href = '/manifest.webmanifest?k=' + encodeURIComponent(token);
@@ -706,6 +724,8 @@ class TalkServer:
                     return self._send(200, body, "application/manifest+json")
                 if route == "/icon.png":
                     return self._send(200, icon_png(), "image/png")
+                if route == "/sw.js":
+                    return self._send(200, WORKER, "application/javascript")
                 if route.startswith("/audio/"):
                     data, kind = server.take_audio(route.rsplit("/", 1)[-1])
                     return self._send(200, data, kind) if data else self._send(404, "gone")
