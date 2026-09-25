@@ -302,6 +302,10 @@ talk.addEventListener('pointerleave', () => { if (!onCall) stop(); });
 # Cloudflare hands back an https address with a real certificate, so the phone stops warning about
 # the Mac's self-signed one - and it works on mobile data, not just at home.
 
+# Two ways out to the internet. Cloudflare needs nothing at all but hands out a different address
+# every time; ngrok's free account includes ONE address that never changes, which is what a
+# home-screen icon needs - so if a fixed address has been set up, that's what we use.
+NGROK = Path.home() / "bin" / "ngrok"
 CLOUDFLARED = Path.home() / "bin" / "cloudflared"
 DOWNLOAD = ("https://github.com/cloudflare/cloudflared/releases/latest/download/"
             "cloudflared-darwin-{arch}.tgz")
@@ -379,12 +383,36 @@ def install_tunnel() -> str | None:
     return None
 
 
+def fixed_address() -> str:
+    """The address that never changes, if one has been set up (an ngrok free static domain)."""
+    try:
+        from core.config import load_settings
+        return str(load_settings().get("talk.address", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _ngrok_ready() -> bool:
+    """Is ngrok here and signed in? (The token lives in ngrok's own config, never in JARVIS.)"""
+    if not NGROK.exists():
+        return False
+    try:
+        done = subprocess.run([str(NGROK), "config", "check"], capture_output=True, text=True,
+                              timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
 def expose(port: int = PORT, secret: str | None = None, wait: float = 40.0) -> str:
     """Publish the talk page on the internet so you can call JARVIS when you're out."""
     import tempfile
 
     if public_url():
         return f"Already reachable from outside: {public_url()}"
+    address = fixed_address()
+    if address and _ngrok_ready():
+        return _expose_fixed(address, port, secret, wait)
     cli = tunnel_cli()
     if not cli:
         problem = install_tunnel()
@@ -413,6 +441,38 @@ def expose(port: int = PORT, secret: str | None = None, wait: float = 40.0) -> s
                     "Real certificate, so no warning - add it to your home screen. Anyone with that "
                     "exact link could talk to me, so keep it to yourself; say 'stop sharing the talk "
                     "page' when you want it closed. The address changes each time it's opened.")
+    unexpose()
+    return "The tunnel didn't come up in time - try again in a moment."
+
+
+def _expose_fixed(address: str, port: int, secret: str | None, wait: float) -> str:
+    """Publish at YOUR address, the one that doesn't change - so the icon on your phone keeps
+    working for good."""
+    import tempfile
+
+    log = Path(tempfile.gettempdir()) / "jarvis-tunnel.log"
+    try:
+        handle = open(log, "w")
+        proc = subprocess.Popen([str(NGROK), "http", f"https://127.0.0.1:{int(port)}",
+                                 "--domain", address, "--host-header", "rewrite",
+                                 "--log", "stdout", "--log-format", "logfmt"],
+                                stdout=handle, stderr=subprocess.STDOUT, close_fds=True)
+    except OSError as exc:
+        return f"I couldn't start the tunnel: {exc}"
+    _TUNNEL.update(proc=proc, log=handle, url="")
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        time.sleep(1.0)
+        text = log.read_text(errors="ignore")
+        if proc.poll() is not None:
+            detail = [line for line in text.splitlines() if "err" in line.lower()]
+            return ("The tunnel stopped: " + (detail[-1][:200] if detail else "no reason given"))
+        if "started tunnel" in text or f"url=https://{address}" in text:
+            _TUNNEL["url"] = f"https://{address}/?k={secret or token()}&call=1"
+            _remember_tunnel(_TUNNEL["url"], proc.pid)
+            return (f"You can call me from anywhere: {_TUNNEL['url']}\n"
+                    "That address is yours and doesn't change, so the icon on your phone will keep "
+                    "working. Keep the link to yourself - anyone with it could talk to me.")
     unexpose()
     return "The tunnel didn't come up in time - try again in a moment."
 

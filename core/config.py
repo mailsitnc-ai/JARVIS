@@ -104,6 +104,10 @@ DEFAULTS: dict[str, Any] = {
         # Also publish it through a tunnel at startup, so you can call from outside the house. The
         # address changes each time, so JARVIS messages you the new one on WhatsApp.
         "outside": False,
+        # An address of your own that never changes (an ngrok free static domain, e.g.
+        # "jarvis-shivam.ngrok-free.app"). Set this and the home-screen icon keeps working for good;
+        # leave it empty and a fresh throwaway address is used each time.
+        "address": "",
     },
     "memory": {
         "max_interactions": 5000,

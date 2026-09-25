@@ -256,6 +256,32 @@ class TunnelTests(IsolatedCase):
         self.assertIn("stopped before it was ready", answer)
         self.assertEqual(self.talk.public_url(), "")
 
+    def test_your_own_address_is_used_when_one_is_set_up(self):
+        """A free tunnel's address changes every time; a fixed one keeps the phone's icon working."""
+        talk = self.talk
+        started = "t=2026-09-25 lvl=info msg=\"started tunnel\" url=https://jarvis-test.ngrok-free.app"
+        with unittest.mock.patch.object(talk, "fixed_address", lambda: "jarvis-test.ngrok-free.app"), \
+             unittest.mock.patch.object(talk, "_ngrok_ready", lambda: True), \
+             self.fake_tunnel(url=started):
+            answer = talk.expose(8765, "sekret", wait=6)
+        self.assertIn("https://jarvis-test.ngrok-free.app/?k=sekret&call=1", answer)
+        self.assertIn("doesn't change", answer)
+        self.assertEqual(talk.public_url(), "https://jarvis-test.ngrok-free.app/?k=sekret&call=1")
+
+    def test_without_a_signed_in_ngrok_it_falls_back_to_the_throwaway_address(self):
+        talk = self.talk
+        with unittest.mock.patch.object(talk, "fixed_address", lambda: "jarvis-test.ngrok-free.app"), \
+             unittest.mock.patch.object(talk, "_ngrok_ready", lambda: False), \
+             unittest.mock.patch.object(talk, "tunnel_cli", lambda: "/bin/echo"), self.fake_tunnel():
+            answer = talk.expose(8765, "sekret", wait=6)
+        self.assertIn("trycloudflare.com", answer)
+
+    def test_the_fixed_address_comes_from_your_settings(self):
+        from core.config import set_user_value
+        self.assertEqual(self.talk.fixed_address(), "")
+        set_user_value("talk.address", "jarvis-shivam.ngrok-free.app")
+        self.assertEqual(self.talk.fixed_address(), "jarvis-shivam.ngrok-free.app")
+
     def test_it_says_what_it_needs_when_the_program_is_missing(self):
         with unittest.mock.patch.object(self.talk, "tunnel_cli", lambda: None), \
              unittest.mock.patch.object(self.talk, "install_tunnel", lambda: "no internet"):
