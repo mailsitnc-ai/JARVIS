@@ -128,7 +128,7 @@ class PhoneChannel:
 
     POLL = 3.0                # seconds between looks at the chat
     HISTORY = 14              # how many of the last messages we re-read each time
-    CONFIRM_WAIT = 180.0      # how long to wait for a "yes" before giving up
+    CONFIRM_WAIT = 90.0       # how long to wait for a "yes" before giving up
     SNAPSHOT_WAIT = 15.0      # how long to let WhatsApp draw the chat before reading it
     MAX_REPLY = 3500          # WhatsApp's message limit is bigger, but nobody reads more than this
 
@@ -145,6 +145,8 @@ class PhoneChannel:
         self.started = None        # messages older than this were already in the chat when we arrived
         self.ours = collections.deque(maxlen=40)   # what we've said, so we never answer ourselves
         self.expecting = False     # our last reply asked YOU something, so the next message is the answer
+        self.working = threading.Event()   # a request is using the browser: the watcher keeps off
+        self.voice_fails = 0
         self.preapproved = False   # you already said yes to this one request; don't ask twice
         self.inbox = queue.Queue()
         self.error = None
@@ -217,12 +219,21 @@ class PhoneChannel:
             self.error = str(exc)
             return False
 
+    def _on_our_chat(self) -> bool:
+        """Only ever take orders from YOUR chat - never from whatever conversation happens to be
+        open, or someone else's message could run a command on your Mac."""
+        try:
+            title = self.controller.whatsapp_open_chat_title()
+        except Exception:
+            return False
+        return bool(title) and (title == self.chat or self._same_chat(title))
+
     def _same_chat(self, title: str) -> bool:
         digits = re.sub(r"\D", "", self.chat)
         return bool(digits) and digits[-8:] in re.sub(r"\D", "", title) or \
             str(title).strip().lower() in ("message yourself", "you", self.chat.strip().lower())
 
-    def say(self, text: str) -> None:
+    def say(self, text: str, voice: bool | None = None) -> None:
         """Answer in the chat (and, when voice is on, as a voice note too)."""
         body = str(text or "").strip()
         if not body:
@@ -241,28 +252,58 @@ class PhoneChannel:
                 self.emit(f"WhatsApp reply failed: {problem}")
         except Exception as exc:
             self.emit(f"WhatsApp reply failed: {exc}")
-        if self.voice:
+        if self.voice and (voice is not False):
             self._voice_note(body)
+            self._forget_our_media()
+
+    def _forget_our_media(self) -> None:
+        """The voice note we just sent arrives as a new message with no text - and an untexted
+        message is how an incoming voice note looks too. Mark ours as seen, or JARVIS tries to
+        transcribe its own voice and treats it as your answer to its own question."""
+        try:
+            for row in self._read()[-3:]:
+                if not str(row.get("text") or "").strip():
+                    self.seen.add(row.get("id"))
+        except Exception:
+            pass
 
     def _voice_note(self, text: str) -> None:
         """JARVIS's own voice, as an audio message - like the bot in the video."""
+        problem = None
         try:
             from core import speechfile
             path = speechfile.to_audio(text)
             if not path:
                 return
             problem = self.controller.whatsapp_attach(str(path))
-            if problem:
-                self.emit(f"Voice note failed: {problem}")
             speechfile.cleanup(path)
         except Exception as exc:
-            self.emit(f"Voice note failed: {exc}")
+            problem = str(exc)
+        finally:
+            # However it went, leave WhatsApp in a state you can type in again: a half-finished
+            # attachment used to block every later reply with "couldn't find the message box".
+            try:
+                self.controller.whatsapp_reset(self.chat)
+            except Exception:
+                pass
+        if not problem:
+            self.voice_fails = 0
+            return
+        self.voice_fails += 1
+        self.emit(f"Voice note failed: {problem}")
+        if self.voice_fails >= 2:      # it's costing more than it's worth - text is instant
+            self.voice = False
+            self.emit("Voice notes are off for now (they kept failing); replies are text only. "
+                      "Say 'watch my whatsapp' again to retry them.")
 
     # ---- the loops -----------------------------------------------------------------------------
     def _watch(self) -> None:
         """Poll the chat and hand anything new to the worker."""
         while not self._stop.is_set():
-            if self._ensure_chat():
+            if self.working.is_set():
+                self._stop.wait(self.poll)     # a request is driving the browser - don't fight it
+                continue
+            if self._ensure_chat() and self._on_our_chat():
                 for message in self._read():
                     ident = message.get("id") or ""
                     if ident in self.seen:
@@ -310,14 +351,21 @@ class PhoneChannel:
             return
         self.emit(f"WhatsApp: {command}")
         why = risk(command)
-        if why and self.ask_yes_no(f"{MARK} That would {why}: \"{command}\".") == "deny":
+        if why and self.ask_yes_no(f'{MARK} That would {why}: "{command}".\n'
+                                   f"Reply YES to go ahead, or NO to skip.") == "deny":
             self.say("Left it alone, sir.")
             return
         self.preapproved = bool(why)   # you've said yes once; the skill itself needn't ask again
+        self.working.set()             # hands off the browser: this request may need the tab itself
         try:
             reply = str(self.ask(command) or "").strip()
         finally:
             self.preapproved = False
+            try:                       # a skill may have gone off to someone else's chat
+                self.controller.whatsapp_reset(self.chat)
+            except Exception:
+                pass
+            self.working.clear()
         self.say(reply or "Done, sir.")
 
     def _transcribe(self, message) -> str:
@@ -344,7 +392,18 @@ class PhoneChannel:
 
     def ask_yes_no(self, question: str) -> str:
         """Ask in the chat and wait for the answer. Returns 'once' / 'always' / 'deny'."""
-        self.say(question)
+        self.say(question, voice=False)     # a spoken copy of the question only gets in the way
+        # We may be in the middle of a request that has the browser to itself - but the answer can
+        # only reach us through the chat, so the watcher has to be let back in while we wait.
+        held = self.working.is_set()
+        self.working.clear()
+        try:
+            return self._wait_for_answer()
+        finally:
+            if held:
+                self.working.set()
+
+    def _wait_for_answer(self) -> str:
         deadline = time.monotonic() + self.CONFIRM_WAIT
         while time.monotonic() < deadline and not self._stop.is_set():
             try:
@@ -352,6 +411,8 @@ class PhoneChannel:
             except queue.Empty:
                 continue
             answer = str(message.get("text") or "")
+            if not answer.strip():
+                continue                       # a voice note or an attachment, not a yes or a no
             if self._is_ours(answer) or self._too_old(message):
                 continue
             body = command_in(answer, require_wake=False) or answer

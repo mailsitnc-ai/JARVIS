@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -185,6 +186,10 @@ class ChromeController:
         self.chrome_exe = chrome_exe
         self.installer = installer  # callable(pkg) -> str, the broker's gated pip install
         self._ws = None
+        # One websocket, possibly several threads (the phone channel watches the chat while a request
+        # is answering in it). Two commands in flight on one socket read each other's replies and
+        # both time out, so every command takes its turn.
+        self._io = threading.RLock()
 
     # ---- launching / connecting ---------------------------------------------------------------
 
@@ -302,6 +307,10 @@ class ChromeController:
     def _cmd(self, method: str, params: dict | None = None, timeout: float = 20):
         """Send one CDP command. The connection is cached across calls, so if the tab/window was closed
         or Chrome restarted since, the socket is dead - drop it and retry once on a fresh tab."""
+        with self._io:
+            return self._cmd_locked(method, params, timeout)
+
+    def _cmd_locked(self, method: str, params: dict | None = None, timeout: float = 20):
         try:
             return self._cmd_once(method, params, timeout)
         except (OSError, EOFError) as exc:  # ConnectionResetError, socket timeouts
@@ -462,8 +471,11 @@ class ChromeController:
     def click_at(self, x: float, y: float) -> None:
         """A real left click at viewport coordinates (CDP input event)."""
         for kind in ("mouseMoved", "mousePressed", "mouseReleased"):
+            # A short timeout on purpose: when the page is busy these can hang, and a click that
+            # never returns used to freeze the phone channel for half a minute.
             self._cmd("Input.dispatchMouseEvent", {"type": kind, "x": x, "y": y, "button": "left",
-                                                   "clickCount": 0 if kind == "mouseMoved" else 1})
+                                                   "clickCount": 0 if kind == "mouseMoved" else 1},
+                      timeout=8)
 
     @staticmethod
     def _norm(name: str) -> str:
@@ -600,6 +612,30 @@ class ChromeController:
             return self.evaluate(_WA_HEADER_JS) or to
         return self._wa_open_chat(to) or f"I couldn't find a WhatsApp chat matching '{to}'."
 
+    def whatsapp_reset(self, chat: str | None = None) -> bool:
+        """Put WhatsApp back to a plain chat you can type in: close any file preview, menu or media
+        viewer left behind by a failed attachment. Without this, one bad attachment stops every
+        later reply with "couldn't find the message box"."""
+        try:
+            if self.evaluate(_WA_SEND_READY_JS):        # a file preview is open
+                self.press_element('[aria-label="Close"],[data-icon="x-alt"],[data-icon="x"]')
+                time.sleep(0.6)
+                for label in ("discard", "yes"):        # "Discard selection?" -> discard it
+                    if self.evaluate(_WA_TAG_MENU_JS % json.dumps(label)):
+                        self._press_tagged()
+                        time.sleep(0.6)
+                        break
+            if self.evaluate("!!document.querySelector('[role=\"dialog\"]')"):
+                self.press_element('[role="dialog"] [aria-label="Close"],[data-icon="x-viewer"]')
+                time.sleep(0.4)
+            ready = self.evaluate(_WA_FOCUS_COMPOSE_JS.replace("el.focus();return true", "return true"))
+            if not ready and chat:
+                self.whatsapp_open(chat)
+                ready = self.evaluate(_WA_FOCUS_COMPOSE_JS.replace("el.focus();return true", "return true"))
+            return bool(ready)
+        except BrowserError:
+            return False
+
     def whatsapp_open_chat_title(self) -> str:
         """Whose chat is open right now (empty when none is)."""
         try:
@@ -687,6 +723,7 @@ class ChromeController:
         full = str(_Path(path).expanduser().resolve())
         if not _Path(full).is_file():
             return f"there's no file at {path}."
+        deadline = time.monotonic() + 30      # never let one attachment hold up the whole channel
         # The paperclip TOGGLES the menu, so a press can just as easily close one that was left
         # open: look first, and press again if the menu isn't there.
         open_menu = bool(self._wa_menu_item("document", tries=1))
@@ -700,8 +737,8 @@ class ChromeController:
             return "WhatsApp's attach menu didn't open."
         if not self._wa_press(_WA_TAG_MENU_JS % json.dumps("document")):
             return "WhatsApp's attach menu has no 'Document' entry."
-        node_id, deadline = 0, time.monotonic() + 6
-        while time.monotonic() < deadline and not node_id:
+        node_id, wait_until = 0, time.monotonic() + 6
+        while time.monotonic() < min(wait_until, deadline) and not node_id:
             time.sleep(0.25)
             accepts = json.loads(self.evaluate(_WA_DOC_INPUT_JS) or "[]")
             index = next((i for i, a in enumerate(accepts) if "image" not in (a or "")), None)
@@ -716,16 +753,16 @@ class ChromeController:
         if not node_id:
             return "WhatsApp never offered a file box for that attachment."
         self._cmd("DOM.setFileInputFiles", {"files": [full], "nodeId": node_id})
-        if not self._wait_for(_WA_SEND_READY_JS, 20):
+        if not self._wait_for(_WA_SEND_READY_JS, max(4, deadline - time.monotonic())):
             # Escape is NOT the way out of here - it opens a "Discard selection?" box on top.
             return "WhatsApp never showed the Send button for that file."
         if caption:
             self.evaluate(_WA_FOCUS_COMPOSE_JS)
             self._cmd("Input.insertText", {"text": caption})
         time.sleep(0.5)
-        for _ in range(2):              # the preview closing again is how we know it really went
+        while time.monotonic() < deadline:   # the preview closing is how we know it really went
             self._wa_press(_WA_TAG_BUTTON_JS % json.dumps(_WA_SEND_SELECTOR))
-            for _ in range(10):
+            for _ in range(8):
                 time.sleep(0.4)
                 if not self.evaluate(_WA_SEND_READY_JS):
                     return None
