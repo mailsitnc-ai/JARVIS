@@ -75,18 +75,39 @@ def certificate(ip: str | None = None):
         return None, None
     return cert, key
 
-WORKER = """/* Re-ask for every page with the header that skips ngrok's free-tier warning, so the
-   icon on your phone opens straight into JARVIS instead of an interstitial. */
+WORKER = """/* Two jobs: skip ngrok's free-tier warning page, and keep a copy of JARVIS on the
+   phone - so the icon opens the real thing even when the Mac is asleep, off, or off the internet.
+   ngrok answers a 404 error page when the Mac is away, which is a perfectly good HTTP response, so
+   anything that isn't ok counts as "not there" and the kept copy is served instead. */
+const SHELL = 'jarvis-shell-1', KEPT = 'jarvis-page';
+
+function asked(req) {
+  return new Request(req, {
+    headers: new Headers([...req.headers.entries(), ['ngrok-skip-browser-warning', 'jarvis']]),
+    mode: req.mode === 'navigate' ? 'same-origin' : req.mode,
+    redirect: 'follow'
+  });
+}
+
 self.addEventListener('install', e => self.skipWaiting());
 self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', event => {
   const req = event.request;
   if (req.method !== 'GET' || !req.url.startsWith(self.location.origin)) return;
-  event.respondWith(fetch(new Request(req, {
-    headers: new Headers([...req.headers.entries(), ['ngrok-skip-browser-warning', 'jarvis']]),
-    mode: req.mode === 'navigate' ? 'same-origin' : req.mode,
-    redirect: 'follow'
-  })).catch(() => fetch(req)));
+  if (req.mode === 'navigate') {
+    event.respondWith((async () => {
+      try {
+        const fresh = await fetch(asked(req));
+        if (!fresh.ok) throw new Error('not there');
+        (await caches.open(SHELL)).put(KEPT, fresh.clone());
+        return fresh;
+      } catch (e) {
+        return (await caches.match(KEPT, {cacheName: SHELL})) || Response.error();
+      }
+    })());
+    return;
+  }
+  event.respondWith(fetch(asked(req)).catch(() => fetch(req)));
 });
 """
 
@@ -133,6 +154,15 @@ PAGE = """<!DOCTYPE html>
                    box-shadow:0 0 70px rgba(41,168,221,.5); animation:pulse 1.8s ease-in-out infinite; }
   #connect p { color:#7c8899; }
   @keyframes pulse { 50% { transform:scale(1.06); box-shadow:0 0 90px rgba(41,168,221,.75); } }
+  #setup { position:fixed; inset:0; z-index:10; display:none; flex-direction:column; gap:16px;
+           align-items:center; justify-content:center; padding:28px; background:#07090dfa; }
+  #setup p { color:#9aa7b8; max-width:22em; text-align:center; line-height:1.5; }
+  #setup input { width:100%; max-width:22em; padding:13px 15px; border-radius:12px;
+                 border:1px solid #23303f; background:#0d1218; color:#e8f1fb; font-size:16px; }
+  #setup button { border-radius:12px; border:1px solid #29506b; background:#10202c; color:#8fe3ff;
+                  padding:11px 20px; font-size:15px; font-weight:600; }
+  #kx { position:fixed; top:10px; right:12px; z-index:8; background:none; border:none;
+        color:#4d5a6b; font-size:12px; }
 </style></head>
 <body>
   <header>J A R V I S</header>
@@ -143,6 +173,13 @@ PAGE = """<!DOCTYPE html>
     <button id="call">Call</button>
   </footer>
   <div id="connect"><div class="ring"></div><p id="connectnote">tap anywhere to connect</p></div>
+  <div id="setup">
+    <p>Paste a Groq or Gemini key. It stays on this phone and lets me answer you here when your
+       Mac is asleep or off.</p>
+    <input id="kf" type="password" autocomplete="off" spellcheck="false" placeholder="gsk_... or AIza...">
+    <button id="ks">Keep it on this phone</button>
+  </div>
+  <button id="kx" title="answer on this phone when the Mac is away">on-phone mode</button>
 <script>
 if ('serviceWorker' in navigator) {        // see WORKER above: skips ngrok's warning page
   navigator.serviceWorker.register('/sw.js' + location.search).catch(() => {});
@@ -216,6 +253,11 @@ function stop() {
   if (rec.state === 'recording') rec.stop();
 }
 
+function hush() {          /* let go of the button: stop whichever ear is open */
+  if (listening) { try { listening.stop(); } catch (e) {} }
+  else stop();
+}
+
 async function ask(blob) {
   if (!blob) { state.textContent = 'the microphone gave nothing back'; return null; }
   if (blob.size < 2000) { state.textContent = "didn't catch that - say a bit more"; return null; }
@@ -248,6 +290,12 @@ function play(url) {
 async function turn(untilSilence) {
   busy = true;
   talk.disabled = true;
+  if (offline) {
+    try { await phoneTurn(); } catch (e) { state.textContent = 'that went wrong: ' + e.message; }
+    busy = false;
+    talk.disabled = false;
+    return;
+  }
   try {
     const blob = await record(untilSilence);
     const data = await ask(blob);
@@ -266,6 +314,134 @@ async function turn(untilSilence) {
   busy = false;
   talk.disabled = false;
   state.textContent = onCall ? 'listening...' : 'hold to talk, or press Call';
+}
+
+/* ---- JARVIS on the phone itself ----------------------------------------------------------
+   When the Mac is asleep or switched off there is nothing to call, so the phone answers instead:
+   its own speech recognition, the same model JARVIS uses on the Mac (your key, kept on this phone
+   and sent nowhere else), and the phone's own voice. Anything that actually needs the Mac is put in
+   a queue and handed over the moment it's back. */
+let offline = false, listening = null, brain = null;
+try { brain = JSON.parse(localStorage.getItem('jarvis-brain') || 'null'); } catch (e) {}
+
+const RULES = "You are JARVIS, speaking to Shivam, who you address as sir. You are running on his "
+  + "phone because his Mac is asleep or switched off, so you cannot touch the Mac right now. "
+  + "Answer in at most three short spoken sentences - no lists, no markdown. If what he asks needs "
+  + "his Mac (opening apps or files, WhatsApp, screenshots, typing, anything on the laptop), reply "
+  + "with exactly LAPTOP: followed by his request in plain words and nothing else.";
+
+/* The key stays yours: you paste it into this phone once, it lives in this phone's storage, and it
+   goes straight to the model from here. The Mac never hands it over and never sees it again. */
+const MODELS = {groq: '__GROQ_MODEL__', gemini: '__GEMINI_MODEL__'};
+
+function setUpBrain(pasted) {
+  const key = (pasted || '').trim();
+  const which = key.startsWith('gsk_') ? 'groq' : (key.startsWith('AIza') ? 'gemini' : '');
+  if (!which) return false;
+  brain = {}; brain[which] = {key: key, model: MODELS[which]};
+  try { localStorage.setItem('jarvis-brain', JSON.stringify(brain)); } catch (e) {}
+  return which;
+}
+
+function showSetup() {
+  const panel = document.getElementById('setup');
+  panel.style.display = 'flex';
+  document.getElementById('kf').focus();
+}
+
+document.getElementById('ks').addEventListener('click', () => {
+  const which = setUpBrain(document.getElementById('kf').value);
+  document.getElementById('kf').value = '';
+  document.getElementById('setup').style.display = 'none';
+  say('jarvis', which ? 'Kept on this phone, sir. I can answer here even with the Mac off.'
+                      : "That doesn't look like a Groq or Gemini key, sir.");
+});
+document.getElementById('kx').addEventListener('click', () => showSetup());
+
+function heardOnPhone() {
+  return new Promise((resolve) => {
+    const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Rec) { resolve(''); return; }
+    const rec = new Rec();
+    rec.lang = 'en-IN'; rec.interimResults = false; rec.maxAlternatives = 1;
+    let said = '';
+    rec.onresult = e => { said = e.results[0][0].transcript; };
+    rec.onerror = () => {};
+    rec.onend = () => { listening = null; resolve(said.trim()); };
+    listening = rec;
+    try { rec.start(); } catch (e) { listening = null; resolve(''); }
+  });
+}
+
+async function askModel(url, headers, body, dig) {
+  const res = await fetch(url, {method: 'POST', headers: headers, body: JSON.stringify(body)});
+  if (!res.ok) return '';
+  return (dig(await res.json()) || '').trim();
+}
+
+async function think(text) {
+  if (!brain) return "I can't reach your Mac, sir, and I've nothing to think with from here yet - "
+                   + "open this once while the Mac is awake and I'll keep what I need.";
+  const tries = [];
+  if (brain.groq) tries.push(() => askModel(
+    'https://api.groq.com/openai/v1/chat/completions',
+    {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + brain.groq.key},
+    {model: brain.groq.model, max_tokens: 300,
+     messages: [{role: 'system', content: RULES}, {role: 'user', content: text}]},
+    d => d.choices && d.choices[0] && d.choices[0].message.content));
+  if (brain.gemini) tries.push(() => askModel(
+    'https://generativelanguage.googleapis.com/v1beta/models/' + brain.gemini.model
+      + ':generateContent?key=' + encodeURIComponent(brain.gemini.key),
+    {'Content-Type': 'application/json'},
+    {system_instruction: {parts: [{text: RULES}]},
+     contents: [{role: 'user', parts: [{text: text}]}]},
+    d => d.candidates && d.candidates[0] && d.candidates[0].content.parts[0].text));
+  for (const attempt of tries) {
+    try { const answer = await attempt(); if (answer) return answer; } catch (e) {}
+  }
+  return "I couldn't reach anything to think with, sir - your phone may be offline too.";
+}
+
+function speak(text) {
+  return new Promise((resolve) => {
+    try {
+      const line = new SpeechSynthesisUtterance(text);
+      line.onend = line.onerror = resolve;
+      speechSynthesis.speak(line);
+    } catch (e) { resolve(); }
+  });
+}
+
+function waiting() { try { return JSON.parse(localStorage.getItem('jarvis-queue') || '[]'); } catch (e) { return []; } }
+function keep(job) { localStorage.setItem('jarvis-queue', JSON.stringify(waiting().concat([job]))); }
+
+async function handOver() {        /* the Mac is back: give it what was asked while it was away */
+  const jobs = waiting();
+  if (!jobs.length) return;
+  localStorage.setItem('jarvis-queue', '[]');
+  for (const job of jobs) {
+    try {
+      const res = await fetch('/say?k=' + encodeURIComponent(token), {method: 'POST', body: job});
+      const data = await res.json();
+      say('jarvis', (data.text || 'Done, sir.') + '   \u2014 ' + job);
+    } catch (e) { keep(job); }
+  }
+}
+
+async function phoneTurn() {
+  state.textContent = 'listening (on your phone)...';
+  const text = await heardOnPhone();
+  if (!text) { state.textContent = "didn't catch that - your Mac is away, I'm listening here"; return; }
+  say('me', text);
+  state.textContent = 'thinking (on your phone)...';
+  let reply = await think(text);
+  if (/^LAPTOP:/i.test(reply)) {
+    keep(reply.replace(/^LAPTOP:[ ]*/i, '').trim());
+    reply = "Your Mac is away, sir. I've noted that and I'll do it the moment it's back.";
+  }
+  say('jarvis', reply);
+  state.textContent = "your Mac is away - I'm answering from your phone";
+  await speak(reply);
 }
 
 /* A call: listen, answer, listen again, until you hang up. */
@@ -318,21 +494,26 @@ async function alive() {
       up = res.ok;
     } catch (e) { up = false; }
     if (up) {
+      offline = false;
       if (note) note.textContent = 'tap anywhere to connect';
-      if (tries) state.textContent = 'hold to talk, or press Call';
+      if (tries) state.textContent = 'your Mac is back, sir';
+      await handOver();        /* hand over anything asked while the Mac was away */
       return;
     }
-    if (note) note.textContent = "your Mac isn't reachable - waiting for it";
-    state.textContent = "can't reach your Mac - it's asleep or switched off";
+    offline = true;
+    if (note) note.textContent = brain ? 'your Mac is away - tap to talk to me here'
+                                       : "your Mac isn't reachable - waiting for it";
+    state.textContent = brain ? "your Mac is away - I'm answering from your phone"
+                              : "can't reach your Mac - it's asleep or switched off";
     await new Promise(r => setTimeout(r, 5000));
   }
 }
 alive();
 
 talk.addEventListener('pointerdown', e => { e.preventDefault(); if (!onCall && !busy) turn(false); });
-talk.addEventListener('pointerup', e => { e.preventDefault(); if (!onCall) stop(); });
-talk.addEventListener('pointercancel', () => { if (!onCall) stop(); });
-talk.addEventListener('pointerleave', () => { if (!onCall) stop(); });
+talk.addEventListener('pointerup', e => { e.preventDefault(); if (!onCall) hush(); });
+talk.addEventListener('pointercancel', () => { if (!onCall) hush(); });
+talk.addEventListener('pointerleave', () => { if (!onCall) hush(); });
 </script></body></html>
 """
 
@@ -626,6 +807,19 @@ def icon_png(size: int = 192) -> bytes:
     return _ICONS[size]
 
 
+def page_html() -> str:
+    """The page, with the model names filled in - which model to ask is not a secret; the key is,
+    and that never leaves your phone."""
+    try:
+        from core.config import load_settings
+        settings = load_settings()
+        groq = str(settings.get("llm.groq.model", "") or "llama-3.3-70b-versatile")
+        gemini = str(settings.get("llm.gemini.model", "") or "gemini-2.5-flash")
+    except Exception:
+        groq, gemini = "llama-3.3-70b-versatile", "gemini-2.5-flash"
+    return PAGE.replace("__GROQ_MODEL__", groq).replace("__GEMINI_MODEL__", gemini)
+
+
 def token_path():
     from core import oslayer
     return Path(oslayer.user_data_dir()) / "talk_token.txt"
@@ -688,6 +882,20 @@ class TalkServer:
                 path.unlink(missing_ok=True)      # your voice isn't kept after it's been read
             except OSError:
                 pass
+
+    def answer_text(self, text: str) -> dict:
+        """A request in words rather than audio - what your phone answered for itself while this Mac
+        was away, and kept for me to actually carry out."""
+        request = str(text or "").strip()
+        if not request:
+            return {"error": "nothing to do"}
+        self.emit(f"phone (kept while I was away): {request}")
+        _LOCAL.calling = True
+        try:
+            reply = str(self.ask(request) or "").strip() or "Done, sir."
+        finally:
+            _LOCAL.calling = False
+        return {"heard": request, "text": reply}
 
     def answer(self, raw: bytes) -> dict:
         """Audio in, answer out - the whole turn, with no HTTP in sight (so it can be tested)."""
@@ -762,7 +970,7 @@ class TalkServer:
                 if not self._allowed():
                     return self._send(403, "Not for this device.")
                 if route in ("/", "/index.html"):
-                    return self._send(200, PAGE, "text/html; charset=utf-8")
+                    return self._send(200, page_html(), "text/html; charset=utf-8")
                 if route == "/manifest.webmanifest":
                     start = f"/?k={server.secret}&call=1"
                     icons = [{"src": f"/icon-{size}.png?k={server.secret}",
@@ -789,7 +997,13 @@ class TalkServer:
             def do_POST(self):
                 if not self._allowed():
                     return self._send(403, "Not for this device.")
-                if urlparse(self.path).path != "/ask":
+                route = urlparse(self.path).path
+                if route == "/say":         # words, not audio: what your phone kept while I was off
+                    length = min(int(self.headers.get("Content-Length") or 0), 4000)
+                    text = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+                    return self._send(200, json.dumps(server.answer_text(text)),
+                                      "application/json")
+                if route != "/ask":
                     return self._send(404, "no such page")
                 length = int(self.headers.get("Content-Length") or 0)
                 if length <= 0:

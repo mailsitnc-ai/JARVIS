@@ -120,6 +120,47 @@ class ServerTests(IsolatedCase):
         self.assertEqual(get(f"{self.base}/alive")[0], 403)
         self.assertIn(b"/alive", get(f"{self.base}/?k=test-secret")[1])
 
+    def test_a_request_kept_by_the_phone_is_carried_out_in_words(self):
+        """What your phone took down while the Mac was asleep, handed over when it wakes."""
+        status, body = get(f"{self.base}/say?k=test-secret", data=b"open my notes",
+                           kind="text/plain")
+        self.assertEqual(status, 200)
+        out = json.loads(body)
+        self.assertEqual(out["heard"], "open my notes")
+        self.assertEqual(out["text"], "you said open my notes")
+
+    def test_a_kept_request_needs_the_secret_too(self):
+        self.assertEqual(get(f"{self.base}/say", data=b"open my notes")[0], 403)
+
+    def test_an_empty_handover_is_not_treated_as_a_request(self):
+        self.assertIn("error", json.loads(get(f"{self.base}/say?k=test-secret", data=b" ")[1]))
+
+    def test_the_page_can_answer_on_the_phone_when_this_mac_is_away(self):
+        page = get(f"{self.base}/?k=test-secret")[1].decode()
+        self.assertIn("webkitSpeechRecognition", page)     # the phone's own ear
+        self.assertIn("SpeechSynthesisUtterance", page)    # and its own voice
+        self.assertIn("api.groq.com", page)
+        self.assertIn("LAPTOP:", page)                     # what it must leave for the Mac
+        self.assertIn("jarvis-queue", page)
+        self.assertNotIn("__GROQ_MODEL__", page)           # the model name is filled in
+
+    def test_the_mac_never_hands_the_phone_a_key(self):
+        """The key is pasted into the phone by hand and kept there - this Mac does not serve it."""
+        from core import keystore
+        page = get(f"{self.base}/?k=test-secret")[1].decode()
+        self.assertNotIn("/setup", page)
+        for name in ("groq", "gemini"):
+            key = keystore.get_key(name)
+            if key:
+                self.assertNotIn(key, page)
+        self.assertEqual(get(f"{self.base}/setup?k=test-secret")[0], 404)
+
+    def test_the_worker_keeps_a_copy_so_the_icon_opens_with_the_mac_off(self):
+        worker = get(f"{self.base}/sw.js?k=test-secret")[1].decode()
+        self.assertIn("caches.open", worker)
+        self.assertIn("caches.match", worker)
+        self.assertIn("fresh.ok", worker)      # ngrok's 404 page must not be kept as the page
+
     def test_unknown_pages_are_not_served(self):
         self.assertEqual(get(f"{self.base}/secrets?k=test-secret")[0], 404)
 
