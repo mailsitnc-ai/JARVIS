@@ -16,7 +16,9 @@ from .oslayer import IS_WINDOWS
 
 ENV_VARS = {"groq": "GROQ_API_KEY", "gemini": "GEMINI_API_KEY",
             # Meta's WhatsApp Cloud API: the token JARVIS answers your messages with
-            "whatsapp": "WHATSAPP_TOKEN"}
+            "whatsapp": "WHATSAPP_TOKEN",
+            # The shared secret between this Mac and JARVIS in the cloud (cloud/worker.js)
+            "cloud": "JARVIS_CLOUD_SECRET"}
 _CRYPTPROTECT_UI_FORBIDDEN = 0x1
 
 

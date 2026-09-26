@@ -102,6 +102,9 @@ class Headless:
         def note(text: str) -> None:
             log.info("phone: %s", text)
 
+        started = keeper.cloud(self.settings, self.ask)
+        if started:
+            note(started)
         remote.configure(self.ask, emit=note, settings=self.settings)
         talk.configure(self.ask, emit=note, settings=self.settings)
         if self.settings.get("whatsapp.enabled", False):

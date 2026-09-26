@@ -121,6 +121,14 @@ DEFAULTS: dict[str, Any] = {
         # Any word you choose; Meta echoes it back once, when it first hooks up to the address.
         "verify": "jarvis",
     },
+    "cloud": {
+        # JARVIS in the cloud (cloud/worker.js) answers your phone whether or not this Mac is awake.
+        # Anything that needs the Mac is left in a queue; this Mac picks those up whenever it's up.
+        # The shared secret is a credential: `jarvis setkey cloud`, never in here.
+        "enabled": False,
+        "address": "",          # https://jarvis.<your-name>.workers.dev
+        "poll_s": 20,
+    },
     "memory": {
         "max_interactions": 5000,
         "recall_k": 3,

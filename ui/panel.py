@@ -285,11 +285,14 @@ class JarvisPanel:
         except Exception as exc:
             self.events.put(("event", f"Alerts unavailable: {exc}"))
         try:   # JARVIS on your phone: the WhatsApp watcher and the call page, kept up on their own
-            from core import remote, talk
+            from core import keeper, remote, talk
             def phone_event(text):       # also to daemon.log, so a phone problem can be diagnosed
                 log.info("phone: %s", text)
                 self.events.put(("event", f"📱 {text}"))
 
+            started = keeper.cloud(self.settings, self._phone_ask)
+            if started:                # jobs JARVIS in the cloud took while this Mac was asleep
+                phone_event(started)
             remote.configure(self._phone_ask, emit=phone_event, settings=self.settings)
             talk.configure(self._phone_ask, emit=phone_event, settings=self.settings)
             # One supervisor for both, on its own thread, forever: at boot Chrome may not be up yet

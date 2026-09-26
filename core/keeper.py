@@ -217,6 +217,18 @@ def services(settings, *, talk=None, remote=None, notify=None) -> list[str]:
     return [note for note in notes if note]
 
 
+_LINKED = {"on": False}
+
+
+def cloud(settings, ask) -> str:
+    """Start picking up whatever JARVIS in the cloud left for this machine. Once is enough."""
+    if not settings.get("cloud.enabled", False) or _LINKED["on"]:
+        return ""
+    from core import cloudlink
+    _LINKED["on"] = True
+    return cloudlink.start(ask)
+
+
 def _first_line(text) -> str:
     return str(text or "").strip().splitlines()[0] if str(text or "").strip() else ""
 
