@@ -109,6 +109,18 @@ DEFAULTS: dict[str, Any] = {
         # leave it empty and a fresh throwaway address is used each time.
         "address": "",
     },
+    "whatsapp": {
+        # WhatsApp without a browser (core/wacloud.py): Meta posts your messages to JARVIS and the
+        # replies go back over the same API, so this works on a machine with no screen and with your
+        # Mac switched off. The token is a credential: `jarvis setkey whatsapp`, never in here.
+        "enabled": False,
+        # The phone number ID from the Meta app (a long number, not your phone number).
+        "phone_id": "",
+        # Only these numbers may command JARVIS - yours. Empty means anyone who finds the number can.
+        "allowed": [],
+        # Any word you choose; Meta echoes it back once, when it first hooks up to the address.
+        "verify": "jarvis",
+    },
     "memory": {
         "max_interactions": 5000,
         "recall_k": 3,

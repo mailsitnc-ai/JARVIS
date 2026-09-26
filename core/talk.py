@@ -987,6 +987,10 @@ class TalkServer:
                     return self._send(200, icon_png(int(asked or 192)), "image/png")
                 if route == "/alive":       # the page asks this the moment it opens
                     return self._send(200, "awake")
+                if route in HOOKS and HOOKS[route].get("get"):
+                    params = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
+                    code, body = HOOKS[route]["get"](params)
+                    return self._send(code, body)
                 if route == "/sw.js":
                     return self._send(200, WORKER, "application/javascript")
                 if route.startswith("/audio/"):
@@ -998,6 +1002,21 @@ class TalkServer:
                 if not self._allowed():
                     return self._send(403, "Not for this device.")
                 route = urlparse(self.path).path
+                if route in HOOKS and HOOKS[route].get("post"):
+                    length = min(int(self.headers.get("Content-Length") or 0), 1 << 20)
+                    raw = self.rfile.read(length) if length else b"{}"
+                    try:
+                        payload = json.loads(raw.decode("utf-8", "replace") or "{}")
+                    except ValueError:
+                        return self._send(400, "that isn't JSON")
+                    # Answer at once, whatever happens next: Meta re-sends anything it isn't
+                    # promptly told arrived, and a slow reply becomes the same request twice.
+                    try:
+                        HOOKS[route]["post"](payload)
+                    except Exception as exc:
+                        log_error = f"webhook: {exc}"
+                        server.emit(log_error)
+                    return self._send(200, "ok")
                 if route == "/say":         # words, not audio: what your phone kept while I was off
                     length = min(int(self.headers.get("Content-Length") or 0), 4000)
                     text = self.rfile.read(length).decode("utf-8", "replace") if length else ""
@@ -1053,6 +1072,15 @@ class TalkServer:
 
 
 # ---- one server per JARVIS ----------------------------------------------------------------------
+
+HOOKS: dict = {}
+
+
+def hook(path: str, on_get=None, on_post=None) -> None:
+    """Hang another address off this same server - what WhatsApp's webhook uses, so one machine with
+    one address answers both your calls and your messages."""
+    HOOKS[path] = {"get": on_get, "post": on_post}
+
 
 _ACTIVE: TalkServer | None = None
 _HANDLERS: dict = {}

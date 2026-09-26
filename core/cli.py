@@ -186,6 +186,13 @@ def _startup_link() -> Path:
 KEEPER_LABEL = "com.jarvis.keeper"
 
 
+def cmd_serve(_args) -> int:
+    """JARVIS with no screen - what runs on the always-on machine."""
+    from .serve import run
+
+    return run()
+
+
 def _launch_agent_plist() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{KEEPER_LABEL}.plist"
 
@@ -849,6 +856,9 @@ def build_parser() -> argparse.ArgumentParser:
     startup = sub.add_parser("startup", help="start JARVIS by itself at sign-in, and keep it up")
     startup.add_argument("action", choices=["enable", "disable", "status"])
     startup.set_defaults(func=cmd_startup)
+
+    serve = sub.add_parser("serve", help="run JARVIS with no screen (for an always-on machine)")
+    serve.set_defaults(func=cmd_serve)
 
     keeper = sub.add_parser("keeper", help="watchdog: start JARVIS whenever it isn't running")
     keeper.add_argument("--gap", type=float, default=0.0, help="seconds between checks")

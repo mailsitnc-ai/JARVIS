@@ -14,7 +14,9 @@ import os
 from .config import user_dir, write_json_atomic
 from .oslayer import IS_WINDOWS
 
-ENV_VARS = {"groq": "GROQ_API_KEY", "gemini": "GEMINI_API_KEY"}
+ENV_VARS = {"groq": "GROQ_API_KEY", "gemini": "GEMINI_API_KEY",
+            # Meta's WhatsApp Cloud API: the token JARVIS answers your messages with
+            "whatsapp": "WHATSAPP_TOKEN"}
 _CRYPTPROTECT_UI_FORBIDDEN = 0x1
 
 
