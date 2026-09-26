@@ -56,6 +56,40 @@ python3 jarvis.py on            # opens the JARVIS panel
 python3 jarvis.py ask "what time is it"
 ```
 
+## 6. Always on, so your phone can reach it
+
+JARVIS answers your WhatsApp and serves the call page from *this* Mac, so the phone side is only
+alive while the Mac's JARVIS is. One command makes that stop being your job:
+
+```bash
+python3 jarvis.py startup enable     # jarvis startup disable / status
+```
+
+That installs a launchd agent (`~/Library/LaunchAgents/com.jarvis.keeper.plist`) which runs
+`jarvis keeper` - a loop that asks JARVIS every 15 seconds whether it's there and starts it when it
+isn't. So JARVIS comes up when you log in, comes back if it crashes at 3am, and gets replaced if it
+ever wedges (a wrapper left with a dead engine inside is cleared out after about a minute). It
+launches `JARVIS.app` when that bundle exists, so macOS keeps the camera/microphone grants attached
+to JARVIS; if the app won't start twice in a row it falls back to running the engine directly.
+Keeper log: `~/Library/Logs/JARVIS-keeper.log`.
+
+Inside JARVIS, the same idea covers the phone channels (`core/keeper.py`, `watch_services`): the call
+page, its address on the internet and the WhatsApp watcher are started at boot and put back within
+half a minute whenever one falls over - sleep drops tunnels and closes Chrome, and that used to leave
+the phone talking to nothing until someone restarted JARVIS by hand.
+
+What this cannot do: a Mac that is **asleep or shut down** serves nothing, and an incoming call can't
+wake it from outside the house. The call page now says so plainly and keeps retrying, so it connects
+by itself once the Mac is back. If you want JARVIS reachable all night, stop the Mac sleeping while
+it's plugged in (needs your password):
+
+```bash
+sudo pmset -c sleep 0 disablesleep 0
+```
+
+And if you want it up after a reboot without logging in by hand, turn on automatic login in System
+Settings > Users & Groups - a login agent only runs once you're logged in.
+
 ## macOS permissions to grant (System Settings ▸ Privacy & Security)
 
 The first time each is used, macOS will prompt — or grant them ahead of time to your terminal / the

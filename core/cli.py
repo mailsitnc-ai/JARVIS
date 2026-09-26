@@ -183,8 +183,29 @@ def _startup_link() -> Path:
     return Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "JARVIS.lnk"
 
 
+KEEPER_LABEL = "com.jarvis.keeper"
+
+
 def _launch_agent_plist() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / "com.jarvis.daemon.plist"
+    return Path.home() / "Library" / "LaunchAgents" / f"{KEEPER_LABEL}.plist"
+
+
+def _keeper_log() -> Path:
+    return Path.home() / "Library" / "Logs" / "JARVIS-keeper.log"
+
+
+def cmd_keeper(args) -> int:
+    """The watchdog launchd runs: start JARVIS whenever it isn't answering, forever."""
+    from .keeper import GAP, answering, guard, launch
+
+    if args.once:
+        print("JARVIS is running." if answering() else f"Not running - {launch()}")
+        return 0
+    gap = args.gap or GAP
+    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} keeper watching JARVIS (every {gap:.0f}s)",
+          flush=True)
+    guard(gap=gap, log=lambda line: print(line, flush=True))
+    return 0
 
 
 def cmd_startup(args) -> int:
@@ -207,28 +228,52 @@ def cmd_startup(args) -> int:
         return 0
     if IS_MAC:
         plist = _launch_agent_plist()
+        old = Path.home() / "Library" / "LaunchAgents" / "com.jarvis.daemon.plist"
         if args.action == "disable":
-            subprocess.run(["launchctl", "unload", str(plist)], capture_output=True)
-            plist.unlink(missing_ok=True)
-            print("JARVIS will no longer start at login.")
+            for gone in (plist, old):
+                subprocess.run(["launchctl", "unload", str(gone)], capture_output=True)
+                gone.unlink(missing_ok=True)
+            print("JARVIS will no longer start on its own. Your phone will only reach it while you\n"
+                  "have started it yourself.")
             return 0
         if args.action == "status":
-            print(f"Start at login: {'enabled' if plist.exists() else 'disabled'}  ({plist})")
+            from .keeper import answering
+            loaded = subprocess.run(["launchctl", "list", KEEPER_LABEL], capture_output=True).returncode == 0
+            print(f"Start on its own: {'enabled' if plist.exists() else 'disabled'}  ({plist})")
+            print(f"Keeper loaded now: {'yes' if loaded else 'no'}")
+            print(f"JARVIS answering:  {'yes' if answering() else 'no'}")
+            print(f"Keeper log:        {_keeper_log()}")
             return 0
+        # The agent runs the KEEPER, not the daemon: a loop that starts JARVIS whenever it isn't
+        # answering. launchd alone would only start it at login - the keeper also covers a crash, a
+        # quit, and waking up hours later, and it launches JARVIS.app when that exists so macOS
+        # keeps the camera/microphone grants attached to JARVIS.
         plist.parent.mkdir(parents=True, exist_ok=True)
         plist.write_text(
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
             '<plist version="1.0"><dict>\n'
-            '  <key>Label</key><string>com.jarvis.daemon</string>\n'
+            f'  <key>Label</key><string>{KEEPER_LABEL}</string>\n'
             '  <key>ProgramArguments</key><array>'
-            f'<string>{_pythonw()}</string><string>{ROOT / "jarvis.py"}</string><string>daemon</string></array>\n'
+            f'<string>{_pythonw()}</string><string>{ROOT / "jarvis.py"}</string><string>keeper</string></array>\n'
             f'  <key>WorkingDirectory</key><string>{ROOT}</string>\n'
             '  <key>RunAtLoad</key><true/>\n'
+            '  <key>KeepAlive</key><true/>\n'
+            '  <key>ThrottleInterval</key><integer>30</integer>\n'
+            f'  <key>StandardOutPath</key><string>{_keeper_log()}</string>\n'
+            f'  <key>StandardErrorPath</key><string>{_keeper_log()}</string>\n'
+            '  <key>EnvironmentVariables</key><dict>'
+            '<key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>'
+            '</dict>\n'
             '</dict></plist>\n', encoding="utf-8")
+        for gone in (old,):        # the previous arrangement started the daemon directly
+            subprocess.run(["launchctl", "unload", str(gone)], capture_output=True)
+            gone.unlink(missing_ok=True)
         subprocess.run(["launchctl", "unload", str(plist)], capture_output=True)
         subprocess.run(["launchctl", "load", str(plist)], capture_output=True)
-        print(f"JARVIS will start at login ({plist}).")
+        print(f"Done. JARVIS now starts itself at login and comes back within a minute if it ever\n"
+              f"stops - so your phone can reach it without you touching this Mac.\n"
+              f"  agent: {plist}\n  log:   {_keeper_log()}")
         return 0
     print("Start-at-login isn't wired up for this platform yet; launch 'jarvis on' manually.")
     return 0
@@ -801,9 +846,14 @@ def build_parser() -> argparse.ArgumentParser:
     config.add_argument("--unset", metavar="KEY")
     config.set_defaults(func=cmd_config)
 
-    startup = sub.add_parser("startup", help="start JARVIS at Windows sign-in")
+    startup = sub.add_parser("startup", help="start JARVIS by itself at sign-in, and keep it up")
     startup.add_argument("action", choices=["enable", "disable", "status"])
     startup.set_defaults(func=cmd_startup)
+
+    keeper = sub.add_parser("keeper", help="watchdog: start JARVIS whenever it isn't running")
+    keeper.add_argument("--gap", type=float, default=0.0, help="seconds between checks")
+    keeper.add_argument("--once", action="store_true", help="check once and exit")
+    keeper.set_defaults(func=cmd_keeper)
 
     from .permissions import CAPABILITIES, STATES
 

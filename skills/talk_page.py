@@ -3,9 +3,9 @@
   'let me talk to you from my phone'   'start the talk page'   'phone mic on'
   'close the talk page'                'where's the talk page'
 
-The page is served by this Mac and locked to a secret link. To reach it from outside the house run
-`tailscale serve --bg 8765` once - phones only allow the microphone on an https address, which
-Tailscale provides.
+The page is served by this Mac and locked to a secret link. It comes up by itself whenever JARVIS
+does (core/keeper.py), including through a tunnel at your own permanent address when
+`talk.outside` is on - no VPN, nothing to start by hand.
 """
 import re
 

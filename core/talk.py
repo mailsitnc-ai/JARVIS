@@ -142,7 +142,7 @@ PAGE = """<!DOCTYPE html>
     <button id="talk">hold<br>to talk</button>
     <button id="call">Call</button>
   </footer>
-  <div id="connect"><div class="ring"></div><p>tap anywhere to connect</p></div>
+  <div id="connect"><div class="ring"></div><p id="connectnote">tap anywhere to connect</p></div>
 <script>
 if ('serviceWorker' in navigator) {        // see WORKER above: skips ngrok's warning page
   navigator.serviceWorker.register('/sw.js' + location.search).catch(() => {});
@@ -230,7 +230,7 @@ async function ask(blob) {
     return await res.json();
   } catch (e) {
     say('jarvis', e.name === 'AbortError' ? 'no answer from the Mac after 45 seconds'
-                                          : 'could not reach the Mac: ' + e.message);
+                                          : "can't reach your Mac - it's asleep or switched off");
     return null;
   } finally {
     clearTimeout(timer);
@@ -258,7 +258,7 @@ async function turn(untilSilence) {
       if (data.audio) await play(data.audio);        // wait, so it doesn't hear itself
     }
   } catch (e) {
-    state.textContent = 'lost the connection to the Mac';
+    state.textContent = "lost your Mac - asleep, off, or off the internet";
     onCall = false;
     call.classList.remove('on');
     call.textContent = 'Call';
@@ -305,6 +305,29 @@ if (params.get('call') === '1') {
     call.click();
   }, {once: true});
 }
+
+/* Say whether the Mac is even there before you start talking to it: a failed call used to look
+   like a broken page, when the answer was simply that the Mac was asleep. Retries quietly, so the
+   moment it wakes up the page says so without being reloaded. */
+async function alive() {
+  const note = document.getElementById('connectnote');
+  for (let tries = 0; ; tries++) {
+    let up = false;
+    try {
+      const res = await fetch('/alive?k=' + encodeURIComponent(token), {cache: 'no-store'});
+      up = res.ok;
+    } catch (e) { up = false; }
+    if (up) {
+      if (note) note.textContent = 'tap anywhere to connect';
+      if (tries) state.textContent = 'hold to talk, or press Call';
+      return;
+    }
+    if (note) note.textContent = "your Mac isn't reachable - waiting for it";
+    state.textContent = "can't reach your Mac - it's asleep or switched off";
+    await new Promise(r => setTimeout(r, 5000));
+  }
+}
+alive();
 
 talk.addEventListener('pointerdown', e => { e.preventDefault(); if (!onCall && !busy) turn(false); });
 talk.addEventListener('pointerup', e => { e.preventDefault(); if (!onCall) stop(); });
@@ -493,6 +516,29 @@ def _expose_fixed(address: str, port: int, secret: str | None, wait: float) -> s
                     "working. Keep the link to yourself - anyone with it could talk to me.")
     unexpose()
     return "The tunnel didn't come up in time - try again in a moment."
+
+
+def tunnel_healthy(timeout: float = 4.0) -> bool:
+    """Is the outside address really connected? A tunnel process can live through the Mac sleeping
+    while its connection is long gone, and then the icon on your phone opens nothing. ngrok's own
+    agent (on 127.0.0.1:4040, no internet needed) is the honest answer; if it can't be asked, the
+    process still being alive is the best we have."""
+    import urllib.request
+
+    if not public_url():
+        return False
+    address = fixed_address()
+    if not address:
+        return True                     # a throwaway tunnel: there is nothing local to ask
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=timeout) as answer:
+            report = json.loads(answer.read().decode("utf-8", "replace"))
+    except Exception:
+        return True
+    tunnels = report.get("tunnels") if isinstance(report, dict) else None
+    if not tunnels:
+        return False                    # the agent is up and serving nothing: ours has gone
+    return any(address in str(t.get("public_url", "")) for t in tunnels)
 
 
 def public_url() -> str:
@@ -731,6 +777,8 @@ class TalkServer:
                 if route.startswith("/icon"):
                     asked = "".join(ch for ch in route if ch.isdigit())
                     return self._send(200, icon_png(int(asked or 192)), "image/png")
+                if route == "/alive":       # the page asks this the moment it opens
+                    return self._send(200, "awake")
                 if route == "/sw.js":
                     return self._send(200, WORKER, "application/javascript")
                 if route.startswith("/audio/"):

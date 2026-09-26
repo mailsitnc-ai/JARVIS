@@ -33,7 +33,7 @@ jarvis startup enable           # optional: keep the hotkey alive from sign-in
 | `jarvis autonomy on\|off\|status` | Unleash it: act without asking, skip plan review, allow risky calls |
 | `jarvis improve <skill> "<reason>"` | Have JARVIS rewrite one of its own evolved skills |
 | `jarvis edit-self "<instruction>"` | Have JARVIS rewrite its own source (tested, auto-rollback) |
-| `jarvis startup enable\|disable\|status` | Start at Windows sign-in |
+| `jarvis startup enable\|disable\|status` | Start at sign-in and stay up (the keeper, see below) |
 
 ## Controlled access to your PC
 

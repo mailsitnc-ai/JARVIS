@@ -284,65 +284,47 @@ class JarvisPanel:
                            speak=self._say)
         except Exception as exc:
             self.events.put(("event", f"Alerts unavailable: {exc}"))
-        try:   # JARVIS on your phone: answer WhatsApp messages you send yourself
-            from core import remote
+        try:   # JARVIS on your phone: the WhatsApp watcher and the call page, kept up on their own
+            from core import remote, talk
             def phone_event(text):       # also to daemon.log, so a phone problem can be diagnosed
                 log.info("phone: %s", text)
                 self.events.put(("event", f"📱 {text}"))
 
             remote.configure(self._phone_ask, emit=phone_event, settings=self.settings)
-            if self.settings.get("remote.enabled", False):
-                # On its own thread, and retried: at boot Chrome may not be up yet, and starting it
-                # can take half a minute - which used to hold up everything after this, and left
-                # the channel silently off if that first go didn't work.
-                threading.Thread(target=self._keep_phone_watching, name="jarvis-phone-start",
-                                 daemon=True).start()
+            talk.configure(self._phone_ask, emit=phone_event, settings=self.settings)
+            # One supervisor for both, on its own thread, forever: at boot Chrome may not be up yet
+            # and starting it takes half a minute, and sleeping the Mac drops the tunnel and closes
+            # Chrome. This starts them now and puts anything that falls over back within half a
+            # minute - the phone should never wait for someone to restart JARVIS by hand.
+            threading.Thread(target=self._phone_supervisor, name="jarvis-phone",
+                             daemon=True).start()
         except Exception as exc:
-            self.events.put(("event", f"Phone control unavailable: {exc}"))
-        try:   # hold-to-talk page, so you can talk to JARVIS from the phone
-            from core import talk
-            talk.configure(self._phone_ask,
-                           emit=lambda text: self.events.put(("event", f"📱 {text}")),
-                           settings=self.settings)
-            if self.settings.get("talk.enabled", False):
-                self.events.put(("event", talk.start()))
-                if self.settings.get("talk.outside", False):
-                    threading.Thread(target=self._share_talk_page, name="jarvis-talk-share",
-                                     daemon=True).start()
-        except Exception as exc:
-            self.events.put(("event", f"Talk page unavailable: {exc}"))
+            self.events.put(("event", f"Phone channels unavailable: {exc}"))
 
-    def _share_talk_page(self) -> None:
-        """Publish the call page and WhatsApp you the address - it's a new one each time, so the
-        newest message in your own chat is always the link that works."""
-        from core import remote, talk
-        answer = talk.expose(getattr(talk._ACTIVE, "port", talk.PORT),
-                             getattr(talk._ACTIVE, "secret", None))
-        log.info("talk: %s", answer.splitlines()[0] if answer else "")
-        self.events.put(("event", f"📞 {answer}"))
-        link = talk.public_url()
-        if not link:
-            return
-        for _ in range(10):        # the phone channel may still be waking up
-            if remote.notify(f"Call me from anywhere: {link}"):
-                return
-            time.sleep(15)
+    def _phone_supervisor(self) -> None:
+        """Bring up whatever the phone needs and keep it up for as long as JARVIS runs: the call
+        page, its address on the internet, and the WhatsApp watcher."""
+        from core import keeper
 
-    def _keep_phone_watching(self, attempts: int = 5, gap: float = 30.0) -> None:
-        """Start watching your WhatsApp, trying again if the browser wasn't ready yet."""
+        def note(text: str) -> None:
+            log.info("phone: %s", text)
+            self.events.put(("event", f"📱 {text}"))
+
+        keeper.watch_services(self.settings, log=note, notify=self._tell_phone_link)
+
+    def _tell_phone_link(self, link: str) -> None:
+        """WhatsApp yourself the call address when it has changed, so the newest message in your own
+        chat is always a link that works. On its own thread - the channel may still be waking up."""
         from core import remote
-        for attempt in range(attempts):
-            try:
-                answer = remote.start()
-            except Exception as exc:
-                answer = f"Phone control failed to start: {exc}"
-            log.info("phone: %s", answer)
-            self.events.put(("event", f"📱 {answer}"))
-            if remote.running():
-                return
-            time.sleep(gap)
-        self.events.put(("event", "📱 I couldn't start watching WhatsApp - say 'watch my whatsapp' "
-                                  "to try again."))
+
+        def send() -> None:
+            for _ in range(10):
+                if remote.notify(f"Call me from anywhere: {link}"):
+                    log.info("phone: sent the new call link")
+                    return
+                time.sleep(15)
+
+        threading.Thread(target=send, name="jarvis-talk-link", daemon=True).start()
 
     def _phone_ask(self, text: str) -> str:
         """Run a request that arrived from the phone and hand back the words to send back."""

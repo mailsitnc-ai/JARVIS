@@ -25,6 +25,19 @@ def get(url, data=None, kind="application/octet-stream"):
         return exc.code, exc.read()
 
 
+class _fake_http:
+    """Just enough of urlopen's return value to be used in a `with`."""
+
+    def __init__(self, body):
+        self.body = body
+
+    def __enter__(self):
+        return self.body
+
+    def __exit__(self, *_exc):
+        return False
+
+
 class AnswerTests(unittest.TestCase):
     """The turn itself, with no HTTP involved."""
 
@@ -99,6 +112,13 @@ class ServerTests(IsolatedCase):
 
     def test_a_huge_upload_is_turned_away(self):
         self.assertEqual(get(f"{self.base}/ask?k=test-secret", data=b"a" * (9 * 1024 * 1024))[0], 413)
+
+    def test_the_phone_can_ask_whether_the_mac_is_even_awake(self):
+        """The page asks this the moment it opens, so a sleeping Mac says so instead of looking
+        like a broken call."""
+        self.assertEqual(get(f"{self.base}/alive?k=test-secret")[0], 200)
+        self.assertEqual(get(f"{self.base}/alive")[0], 403)
+        self.assertIn(b"/alive", get(f"{self.base}/?k=test-secret")[1])
 
     def test_unknown_pages_are_not_served(self):
         self.assertEqual(get(f"{self.base}/secrets?k=test-secret")[0], 404)
@@ -296,6 +316,44 @@ class TunnelTests(IsolatedCase):
         self.assertEqual(self.talk.fixed_address(), "")
         set_user_value("talk.address", "jarvis-shivam.ngrok-free.app")
         self.assertEqual(self.talk.fixed_address(), "jarvis-shivam.ngrok-free.app")
+
+    def test_no_tunnel_at_all_is_not_healthy(self):
+        self.assertFalse(self.talk.tunnel_healthy())
+
+    def test_a_throwaway_tunnel_counts_as_healthy_while_its_process_lives(self):
+        with unittest.mock.patch.object(self.talk, "tunnel_cli", lambda: "/bin/echo"), self.fake_tunnel():
+            self.talk.expose(8765, "sekret", wait=6)
+        self.assertTrue(self.talk.tunnel_healthy())
+
+    def test_your_own_address_is_checked_against_what_ngrok_is_really_serving(self):
+        """ngrok can live through the Mac sleeping with its connection long gone - so ask its own
+        agent, on this machine, what it is actually publishing."""
+        import io
+
+        with unittest.mock.patch.object(self.talk, "public_url",
+                                        lambda: "https://mine.ngrok-free.dev/?k=1"), \
+             unittest.mock.patch.object(self.talk, "fixed_address", lambda: "mine.ngrok-free.dev"):
+            def agent(body):
+                return unittest.mock.patch("urllib.request.urlopen",
+                                           lambda *a, **k: _fake_http(io.BytesIO(body)))
+
+            with agent(b'{"tunnels": [{"public_url": "https://mine.ngrok-free.dev"}]}'):
+                self.assertTrue(self.talk.tunnel_healthy())
+            with agent(b'{"tunnels": []}'):
+                self.assertFalse(self.talk.tunnel_healthy())
+            with agent(b'{"tunnels": [{"public_url": "https://someone-else.ngrok-free.dev"}]}'):
+                self.assertFalse(self.talk.tunnel_healthy())
+
+    def test_an_unreachable_agent_falls_back_to_the_process_being_alive(self):
+        """If ngrok's local agent can't be asked, don't tear down a tunnel that may well be fine."""
+        def refuse(*_a, **_k):
+            raise OSError("connection refused")
+
+        with unittest.mock.patch.object(self.talk, "public_url",
+                                        lambda: "https://mine.ngrok-free.dev/?k=1"), \
+             unittest.mock.patch.object(self.talk, "fixed_address", lambda: "mine.ngrok-free.dev"), \
+             unittest.mock.patch("urllib.request.urlopen", refuse):
+            self.assertTrue(self.talk.tunnel_healthy())
 
     def test_it_says_what_it_needs_when_the_program_is_missing(self):
         with unittest.mock.patch.object(self.talk, "tunnel_cli", lambda: None), \

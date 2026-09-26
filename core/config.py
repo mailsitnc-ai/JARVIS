@@ -93,8 +93,8 @@ DEFAULTS: dict[str, Any] = {
     },
     "talk": {
         # The hold-to-talk page for your phone (core/talk.py): hold the button, speak, hear the
-        # answer. Keep host on 127.0.0.1 and reach it with `tailscale serve --bg 8765` - phones only
-        # allow the microphone on an https page, which Tailscale gives you for free.
+        # answer. It is started - and restarted after sleep - by core/keeper.py, so the phone never
+        # waits for someone to start JARVIS on the Mac.
         "enabled": False,
         "port": 8765,
         # 0.0.0.0 so your phone on the same wi-fi can reach it; the page is locked to a secret token.
