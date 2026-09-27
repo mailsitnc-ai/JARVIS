@@ -28,70 +28,156 @@ function ring(cx, cy, r, from, to, width, colour, glow) {
 
 function draw() {
   const w = canvas.clientWidth, h = canvas.clientHeight;
-  const cx = w / 2, cy = h / 2, R = Math.min(w, h) * 0.34;
+  const cx = w / 2, cy = h / 2, R = Math.min(w, h) * 0.42;
   ctx.clearRect(0, 0, w, h);
   level += (want - level) * 0.12;
-  spin += 0.004;
+  spin += 0.0035;
+  const beat = 0.5 + 0.5 * Math.sin(spin * 7);          /* the reactor's idle pulse */
+  const heat = 0.55 + level * 0.45 + beat * 0.06;
 
-  /* the core: a hot centre under glass */
-  const core = ctx.createRadialGradient(cx, cy, R * 0.02, cx, cy, R * 0.72);
-  core.addColorStop(0, 'rgba(235,250,255,' + (0.85 + level * 0.15) + ')');
-  core.addColorStop(0.18, 'rgba(120,215,255,0.55)');
-  core.addColorStop(0.55, 'rgba(30,110,190,0.22)');
-  core.addColorStop(1, 'rgba(8,18,36,0)');
-  ctx.fillStyle = core;
-  ctx.beginPath(); ctx.arc(cx, cy, R * 0.72, 0, Math.PI * 2); ctx.fill();
-
-  /* the lattice: spokes and arcs, the reference's web in JARVIS's own geometry */
-  ctx.save(); ctx.translate(cx, cy); ctx.rotate(spin * 0.35);
-  for (let i = 0; i < 12; i++) {
-    const a = (i / 12) * Math.PI * 2;
+  /* --- the lattice it sits in, faint and far out ------------------------------------------ */
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(spin * 0.3);
+  for (let i = 0; i < 24; i++) {
+    const a = (i / 24) * Math.PI * 2;
     ctx.beginPath();
-    ctx.moveTo(Math.cos(a) * R * 0.78, Math.sin(a) * R * 0.78);
-    ctx.lineTo(Math.cos(a) * R * 1.5, Math.sin(a) * R * 1.5);
-    ctx.strokeStyle = 'rgba(120,190,255,0.16)'; ctx.lineWidth = 1; ctx.stroke();
-  }
-  for (let k = 1; k <= 4; k++) {
-    ctx.beginPath();
-    for (let i = 0; i <= 12; i++) {
-      const a = (i / 12) * Math.PI * 2, r = R * (0.78 + k * 0.18);
-      const x = Math.cos(a) * r, y = Math.sin(a) * r;
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-    }
-    ctx.closePath();
-    ctx.strokeStyle = 'rgba(120,190,255,' + (0.14 - k * 0.02) + ')';
+    ctx.moveTo(Math.cos(a) * R * 1.05, Math.sin(a) * R * 1.05);
+    ctx.lineTo(Math.cos(a) * R * 1.75, Math.sin(a) * R * 1.75);
+    ctx.strokeStyle = 'rgba(120,190,255,' + (i % 2 ? 0.05 : 0.11) + ')';
     ctx.lineWidth = 1; ctx.stroke();
   }
+  for (let k = 1; k <= 3; k++) {
+    ctx.beginPath(); ctx.arc(0, 0, R * (1.05 + k * 0.22), 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(120,190,255,' + (0.10 - k * 0.025) + ')';
+    ctx.setLineDash(k === 2 ? [3, 9] : []); ctx.lineWidth = 1; ctx.stroke();
+    ctx.setLineDash([]);
+  }
   ctx.restore();
 
-  /* two arcs facing each other across the core - warm on the left, cold on the right */
-  const lean = Math.sin(spin * 1.6) * 0.05;
-  ring(cx, cy, R * 1.12, 2.44 + lean, 3.84 + lean, 3.4, 'rgba(255,157,77,0.9)', 20);
-  ring(cx, cy, R * 1.12, -0.70 - lean, 0.70 - lean, 3.4, 'rgba(73,184,255,0.95)', 20);
+  /* --- the housing: ten copper coils around a dark rim ------------------------------------ */
+  ring(cx, cy, R * 0.94, 0, Math.PI * 2, R * 0.16, 'rgba(10,22,42,0.92)', 0);
+  ring(cx, cy, R * 0.94, 0, Math.PI * 2, 1.4, 'rgba(120,190,255,0.35)', 8);
+  ring(cx, cy, R * 0.86, 0, Math.PI * 2, 1, 'rgba(120,190,255,0.22)', 0);
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(spin * 0.6);
+  const COILS = 10;
+  for (let i = 0; i < COILS; i++) {
+    const a0 = (i / COILS) * Math.PI * 2 + 0.045;
+    const a1 = ((i + 1) / COILS) * Math.PI * 2 - 0.045;
+    const lit = 0.30 + 0.5 * Math.max(0, Math.sin(spin * 5 - i * 0.62));
+    ring(0, 0, R * 0.94, a0, a1, R * 0.115, 'rgba(46,120,200,' + (0.22 + lit * 0.3) + ')', 0);
+    ring(0, 0, R * 0.94, a0, a1, 2.2, 'rgba(143,227,255,' + (0.25 + lit * 0.55) + ')', 14);
+    /* the winding inside each coil */
+    for (let s = 1; s < 5; s++) {
+      const a = a0 + (a1 - a0) * (s / 5);
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * R * 0.885, Math.sin(a) * R * 0.885);
+      ctx.lineTo(Math.cos(a) * R * 1.0, Math.sin(a) * R * 1.0);
+      ctx.strokeStyle = 'rgba(143,227,255,' + (0.10 + lit * 0.18) + ')';
+      ctx.lineWidth = 1; ctx.stroke();
+    }
+  }
+  ctx.restore();
 
-  /* the ticks around the rim */
-  ctx.save(); ctx.translate(cx, cy); ctx.rotate(-spin * 0.8);
-  for (let i = 0; i < 72; i++) {
-    const a = (i / 72) * Math.PI * 2, lit = i % 6 === 0;
+  /* --- the tick ring, counter-rotating ---------------------------------------------------- */
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(-spin * 1.1);
+  for (let i = 0; i < 96; i++) {
+    const a = (i / 96) * Math.PI * 2, big = i % 8 === 0;
     ctx.beginPath();
-    ctx.moveTo(Math.cos(a) * R * 0.9, Math.sin(a) * R * 0.9);
-    ctx.lineTo(Math.cos(a) * R * (lit ? 0.96 : 0.93), Math.sin(a) * R * (lit ? 0.96 : 0.93));
-    ctx.strokeStyle = lit ? 'rgba(143,227,255,0.55)' : 'rgba(143,227,255,0.22)';
-    ctx.lineWidth = lit ? 1.6 : 1; ctx.stroke();
+    ctx.moveTo(Math.cos(a) * R * 0.78, Math.sin(a) * R * 0.78);
+    ctx.lineTo(Math.cos(a) * R * (big ? 0.72 : 0.755), Math.sin(a) * R * (big ? 0.72 : 0.755));
+    ctx.strokeStyle = big ? 'rgba(143,227,255,0.6)' : 'rgba(143,227,255,0.24)';
+    ctx.lineWidth = big ? 1.7 : 1; ctx.stroke();
   }
   ctx.restore();
 
-  /* the voice, straight through the middle */
+  /* --- the sweep: something is always being scanned --------------------------------------- */
+  const sweep = ctx.createLinearGradient(cx - R, cy, cx + R, cy);
+  sweep.addColorStop(0, 'rgba(73,184,255,0)');
+  sweep.addColorStop(1, 'rgba(73,184,255,0.30)');
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(spin * 3.4);
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, R * 0.70, -0.42, 0); ctx.closePath();
+  ctx.fillStyle = sweep; ctx.fill();
+  ctx.restore();
+
+  /* --- the element: a triangle inside a hexagon, the shape everyone knows ------------------ */
+  ctx.save(); ctx.translate(cx, cy);
+  ctx.rotate(-spin * 0.5);
   ctx.beginPath();
-  for (let x = -R * 0.66; x <= R * 0.66; x += 2) {
-    const fade = 1 - Math.abs(x) / (R * 0.66);
-    const y = Math.sin(x * 0.11 + spin * 9) * R * 0.2 * level * fade
-            + Math.sin(x * 0.33 - spin * 13) * R * 0.08 * level * fade;
-    x === -R * 0.66 ? ctx.moveTo(cx + x, cy + y) : ctx.lineTo(cx + x, cy + y);
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2 - Math.PI / 2, r = R * 0.62;
+    i ? ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r) : ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
   }
-  ctx.strokeStyle = 'rgba(143,227,255,' + (0.35 + level * 0.6) + ')';
-  ctx.lineWidth = 2; ctx.shadowBlur = 16; ctx.shadowColor = 'rgba(73,184,255,0.9)';
+  ctx.closePath();
+  ctx.strokeStyle = 'rgba(143,227,255,0.45)'; ctx.lineWidth = 1.6;
+  ctx.shadowBlur = 14; ctx.shadowColor = 'rgba(73,184,255,0.8)'; ctx.stroke(); ctx.shadowBlur = 0;
+
+  ctx.rotate(spin * 1.6);
+  ctx.beginPath();
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * Math.PI * 2 - Math.PI / 2, r = R * 0.5;
+    i ? ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r) : ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  ctx.closePath();
+  ctx.strokeStyle = 'rgba(190,240,255,' + (0.5 + heat * 0.3) + ')'; ctx.lineWidth = 2;
+  ctx.shadowBlur = 20; ctx.shadowColor = 'rgba(143,227,255,0.9)'; ctx.stroke(); ctx.shadowBlur = 0;
+  ctx.restore();
+
+  /* --- spokes feeding the core ------------------------------------------------------------ */
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(spin * 0.9);
+  for (let i = 0; i < 18; i++) {
+    const a = (i / 18) * Math.PI * 2;
+    const pull = 0.5 + 0.5 * Math.sin(spin * 6 - i * 0.5);
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * R * 0.30, Math.sin(a) * R * 0.30);
+    ctx.lineTo(Math.cos(a) * R * 0.70, Math.sin(a) * R * 0.70);
+    ctx.strokeStyle = 'rgba(143,227,255,' + (0.07 + pull * 0.20 * heat) + ')';
+    ctx.lineWidth = 1.3; ctx.stroke();
+  }
+  ctx.restore();
+
+  /* --- the core: white hot, blooming ------------------------------------------------------ */
+  const bloom = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 1.05);
+  bloom.addColorStop(0, 'rgba(255,255,255,' + Math.min(1, 1.05 * heat) + ')');
+  bloom.addColorStop(0.09, 'rgba(226,250,255,' + (0.96 * heat) + ')');
+  bloom.addColorStop(0.20, 'rgba(140,225,255,' + (0.70 * heat) + ')');
+  bloom.addColorStop(0.38, 'rgba(60,160,235,' + (0.34 * heat) + ')');
+  bloom.addColorStop(0.70, 'rgba(26,86,160,' + (0.14 * heat) + ')');
+  bloom.addColorStop(1, 'rgba(8,18,36,0)');
+  ctx.fillStyle = bloom;
+  ctx.beginPath(); ctx.arc(cx, cy, R * 1.05, 0, Math.PI * 2); ctx.fill();
+
+  /* the inner coil ring, six small windings tight around the core */
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(-spin * 2.2);
+  for (let i = 0; i < 6; i++) {
+    const a0 = (i / 6) * Math.PI * 2 + 0.10, a1 = ((i + 1) / 6) * Math.PI * 2 - 0.10;
+    const lit = 0.4 + 0.6 * Math.max(0, Math.sin(spin * 8 - i * 1.05));
+    ring(0, 0, R * 0.40, a0, a1, R * 0.05, 'rgba(120,215,255,' + (0.14 + lit * 0.22) + ')', 0);
+    ring(0, 0, R * 0.40, a0, a1, 1.6, 'rgba(226,250,255,' + (0.3 + lit * 0.5) + ')', 12);
+  }
+  ctx.restore();
+
+  /* the hot eye itself */
+  ring(cx, cy, R * 0.30, 0, Math.PI * 2, 2.4, 'rgba(245,253,255,' + (0.55 + heat * 0.45) + ')', 30);
+  ring(cx, cy, R * 0.21, 0, Math.PI * 2, 1.4, 'rgba(180,240,255,0.7)', 18);
+  ctx.beginPath(); ctx.arc(cx, cy, R * 0.115 * (0.94 + beat * 0.10), 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,' + (0.80 + heat * 0.2) + ')';
+  ctx.shadowBlur = 44; ctx.shadowColor = 'rgba(150,225,255,1)'; ctx.fill(); ctx.shadowBlur = 0;
+
+  /* --- your voice, straight through the middle -------------------------------------------- */
+  ctx.beginPath();
+  for (let x = -R * 0.58; x <= R * 0.58; x += 2) {
+    const fade = 1 - Math.abs(x) / (R * 0.58);
+    const y = Math.sin(x * 0.11 + spin * 9) * R * 0.17 * level * fade
+            + Math.sin(x * 0.33 - spin * 13) * R * 0.07 * level * fade;
+    x === -R * 0.58 ? ctx.moveTo(cx + x, cy + y) : ctx.lineTo(cx + x, cy + y);
+  }
+  ctx.strokeStyle = 'rgba(235,250,255,' + (0.3 + level * 0.65) + ')';
+  ctx.lineWidth = 2; ctx.shadowBlur = 18; ctx.shadowColor = 'rgba(73,184,255,0.95)';
   ctx.stroke(); ctx.shadowBlur = 0;
+
+  /* --- the two arcs facing each other across it ------------------------------------------- */
+  const lean = Math.sin(spin * 1.6) * 0.05;
+  ring(cx, cy, R * 1.20, 2.44 + lean, 3.84 + lean, 3.4, 'rgba(255,157,77,0.9)', 22);
+  ring(cx, cy, R * 1.20, -0.70 - lean, 0.70 - lean, 3.4, 'rgba(73,184,255,0.95)', 22);
 
   requestAnimationFrame(draw);
 }

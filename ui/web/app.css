@@ -4,8 +4,8 @@
 :root {
   --void: #05070c;
   --deep: #070c16;
-  --glass: rgba(24, 48, 82, 0.34);
-  --glassline: rgba(90, 170, 255, 0.28);
+  --glass: rgba(24, 48, 82, 0.16);
+  --glassline: rgba(120, 190, 255, 0.20);
   --ink: #dce9fb;
   --quiet: #6f88a8;
   --blue: #49b8ff;
@@ -68,11 +68,11 @@ main {
 .column { display: flex; flex-direction: column; gap: 18px; min-height: 0; }
 
 .card {
-  background: linear-gradient(160deg, rgba(30, 62, 108, .42), rgba(10, 22, 42, .55));
+  background: linear-gradient(160deg, rgba(46, 92, 150, .13), rgba(10, 22, 42, .17));
   border: 1px solid var(--glassline);
   border-radius: 14px;
-  box-shadow: inset 0 1px 0 rgba(150, 210, 255, .18), 0 18px 44px rgba(0, 0, 0, .5);
-  backdrop-filter: blur(9px);
+  box-shadow: inset 0 1px 0 rgba(160, 215, 255, .12), 0 16px 40px rgba(0, 0, 0, .34);
+  backdrop-filter: blur(14px) saturate(120%);
   display: flex; flex-direction: column; min-height: 0; overflow: hidden;
 }
 .card:first-child { flex: 0 1 auto; }
@@ -121,7 +121,7 @@ main {
 .task {
   border: 1px solid rgba(90, 170, 255, .18); border-radius: 10px;
   padding: 10px 12px; margin: 8px 0; cursor: pointer;
-  background: rgba(12, 30, 56, .5);
+  background: rgba(20, 44, 78, .22);
 }
 .task:hover { border-color: rgba(120, 200, 255, .45); }
 .task .what { font-size: 13px; color: var(--ink); }
@@ -152,7 +152,8 @@ main {
 footer { height: 92px; flex: none; position: relative; display: grid; place-items: center; }
 #askform {
   width: min(760px, 68vw); display: flex; align-items: center; gap: 10px;
-  background: linear-gradient(160deg, rgba(30, 62, 108, .5), rgba(10, 22, 42, .6));
+  background: linear-gradient(160deg, rgba(46, 92, 150, .16), rgba(10, 22, 42, .20));
+  backdrop-filter: blur(14px) saturate(120%);
   border: 1px solid var(--glassline); border-radius: 26px; padding: 6px 8px 6px 22px;
   box-shadow: 0 0 40px rgba(20, 80, 150, .35), inset 0 1px 0 rgba(150, 210, 255, .2);
 }
