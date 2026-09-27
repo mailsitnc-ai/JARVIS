@@ -176,21 +176,34 @@ class AddressTests(unittest.TestCase):
 class WatchTests(unittest.TestCase):
     def test_it_keeps_asking(self):
         turns = []
-        with swap(once=lambda ask: turns.append(1) or 1):
+        with swap(_call=Calls({"/jobs": {"jobs": []}}), once=lambda ask, jobs=None: turns.append(1)):
             cloudlink.watch(lambda _t: "", gap=0, rounds=3, sleep=lambda _s: None)
         self.assertEqual(len(turns), 3)
 
+    def test_asking_for_work_is_one_request_not_two(self):
+        """A quiet Mac should cost a single small call every few seconds, nothing more."""
+        calls = Calls({"/jobs": {"jobs": []}})
+        with swap(_call=calls):
+            cloudlink.watch(lambda _t: "", gap=0, rounds=5, sleep=lambda _s: None)
+        self.assertEqual([path for path, _data in calls.made], ["/jobs"] * 5)
+
+    def test_work_that_is_waiting_is_carried_out(self):
+        done = []
+        with swap(_call=Calls({"/jobs": {"jobs": [JOB]}}), once=lambda ask, jobs=None: done.extend(jobs)):
+            cloudlink.watch(lambda _t: "", gap=0, rounds=1, sleep=lambda _s: None)
+        self.assertEqual(done, [JOB])
+
     def test_it_backs_off_when_the_cloud_is_not_there(self):
         waits = []
-        with swap(once=lambda ask: 0, reachable=lambda: False):
+        with swap(_call=Calls({"/jobs": None})):
             cloudlink.watch(lambda _t: "", gap=1.0, rounds=2, sleep=waits.append)
         self.assertEqual(waits, [cloudlink.QUIET, cloudlink.QUIET])
 
     def test_a_crash_does_not_end_the_watch(self):
-        def explode(_ask):
+        def explode(*_a, **_k):
             raise RuntimeError("boom")
 
-        with swap(once=explode):
+        with swap(_call=explode):
             cloudlink.watch(lambda _t: "", gap=0, rounds=2, sleep=lambda _s: None)   # must not raise
 
 

@@ -14,10 +14,17 @@ const MODEL = 'openai/gpt-oss-120b';
 const TURNS = 12;                    /* how much of the conversation is remembered */
 const RULES =
   "You are JARVIS, Shivam's assistant. You address him as sir, briefly and drily - never servile. " +
-  "You are running in the cloud, so you cannot see or touch his Mac right now. Answer in at most " +
-  "three short sentences, no lists, no markdown. If what he asks needs his Mac (opening apps or " +
-  "files, screenshots, typing, browsing, anything on the laptop), reply with exactly LAPTOP: " +
-  "followed by his request in plain words and nothing else.";
+  "Answer in at most three short sentences, no lists, no markdown.\n" +
+  "You are running in the cloud. You have NO hands: you cannot see, start, stop, open, close, check " +
+  "or change one single thing on his Mac, his camera, his files or his apps. So you must NEVER say " +
+  "you have done, started, stopped, checked or halted anything - that is a lie, and he will believe " +
+  "it and walk away while nothing happened.\n" +
+  "If his message asks for ANYTHING to happen on his computer - start or stop something, hand " +
+  "control, the camera, a screenshot, opening or closing an app or file, typing, the browser, " +
+  "music, volume, what is on screen, battery, anything at all involving the machine - reply with " +
+  "exactly LAPTOP: followed by his request in plain words, and nothing else. Say it once.\n" +
+  "When you are not sure whether something needs the Mac, use LAPTOP:. Only answer directly when " +
+  "the question is pure conversation or general knowledge that needs no machine of his.";
 
 export default {
   async fetch(request, env) {
@@ -92,7 +99,7 @@ async function handle(message, env) {
        itself, "do the thingLAPTOP: do the thing", and the Mac should not be handed that. */
     const job = answer.split(/LAPTOP:\s*/i).pop().trim();
     await queue(job, message.from, env);
-    answer = "That one's for the Mac, sir. It's on the list and I'll run it the moment it's awake.";
+    answer = "Over to the Mac, sir - I'll tell you what it says.";
   }
   history.push({role: 'user', content: message.text}, {role: 'assistant', content: answer});
   await env.JARVIS.put('history:' + message.from, JSON.stringify(history.slice(-TURNS)),

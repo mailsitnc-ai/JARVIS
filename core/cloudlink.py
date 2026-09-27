@@ -26,7 +26,9 @@ log = logging.getLogger("jarvis.cloudlink")
 # Cloudflare's edge turns away Python's default user agent before the worker ever runs (error 1010,
 # which looks exactly like a wrong password from here), so every call says who it is.
 AGENT = "JARVIS/1.0 (+https://github.com/mailsitnc-ai/JARVIS)"
-POLL = 20.0          # how often the Mac asks whether anything was left for it
+# Every empty poll is one request against a 100,000/day allowance, so 5 seconds costs about 17,000
+# a day and makes the Mac feel like it is in the room rather than down a corridor.
+POLL = 5.0           # how often the Mac asks whether anything was left for it
 QUIET = 120.0        # how long to back off after the cloud fails to answer
 TIMEOUT = 15.0
 
@@ -110,14 +112,20 @@ def once(ask, jobs=None) -> int:
 
 
 def watch(ask, gap: float = POLL, rounds: int | None = None, sleep=time.sleep) -> None:
-    """Keep asking the cloud for work for as long as this Mac is up."""
+    """Keep asking the cloud for work for as long as this Mac is up.
+
+    One call per turn: asking for the jobs already tells us whether the cloud is there, so a quiet
+    Mac makes a single small request every few seconds and nothing else."""
     turn = 0
     while rounds is None or turn < rounds:
         turn += 1
         try:
-            if once(ask) == 0 and not reachable():
-                sleep(QUIET)          # the cloud is down or not set up: stop hammering it
+            answer = _call("/jobs")
+            if answer is None:        # not there, or not set up: stop hammering it
+                sleep(QUIET)
                 continue
+            jobs = answer.get("jobs") if isinstance(answer, dict) else None
+            once(ask, jobs=[job for job in (jobs or []) if isinstance(job, dict) and job.get("text")])
         except Exception:
             log.exception("the cloud link fell over")
             sleep(QUIET)
