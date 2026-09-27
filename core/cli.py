@@ -186,6 +186,13 @@ def _startup_link() -> Path:
 KEEPER_LABEL = "com.jarvis.keeper"
 
 
+def cmd_desk(args) -> int:
+    """Open the full-screen JARVIS interface."""
+    from ui.desk import run
+
+    return run(fullscreen=not args.window)
+
+
 def cmd_serve(_args) -> int:
     """JARVIS with no screen - what runs on the always-on machine."""
     from .serve import run
@@ -856,6 +863,10 @@ def build_parser() -> argparse.ArgumentParser:
     startup = sub.add_parser("startup", help="start JARVIS by itself at sign-in, and keep it up")
     startup.add_argument("action", choices=["enable", "disable", "status"])
     startup.set_defaults(func=cmd_startup)
+
+    desk = sub.add_parser("desk", help="open the full-screen JARVIS interface")
+    desk.add_argument("--window", action="store_true", help="a normal window, for side-by-side work")
+    desk.set_defaults(func=cmd_desk)
 
     serve = sub.add_parser("serve", help="run JARVIS with no screen (for an always-on machine)")
     serve.set_defaults(func=cmd_serve)

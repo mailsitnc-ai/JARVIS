@@ -250,8 +250,15 @@ class JarvisPanel:
         try:
             from core.orchestrator import Jarvis
 
-            jarvis = Jarvis(on_event=lambda _stage, message: self.events.put(("event", message)),
-                            confirm=self._confirm_action)
+            def engine_event(stage, message):
+                self.events.put(("event", message))
+                try:                    # the new interface shows the working-out as it happens
+                    from core import webui
+                    webui.step(stage, message)
+                except Exception:
+                    pass
+
+            jarvis = Jarvis(on_event=engine_event, confirm=self._confirm_action)
             for filename, error in jarvis.registry.errors.items():
                 self.events.put(("error", f"Skill {filename} failed to load: {error}"))
             self.jarvis = jarvis
@@ -284,6 +291,15 @@ class JarvisPanel:
                            speak=self._say)
         except Exception as exc:
             self.events.put(("event", f"Alerts unavailable: {exc}"))
+        try:   # the new full-screen interface, served locally and drawn in the Mac's own WebKit
+            from core import webui
+            webui.configure(self._phone_ask, settings=self.settings, speak=self._say)
+            started = webui.start(int(self.settings.get("desk.port", 8766)))
+            if started:
+                log.info("desk: %s", started)
+                self.events.put(("event", f"Interface ready: {started}"))
+        except Exception as exc:
+            self.events.put(("event", f"Interface unavailable: {exc}"))
         try:   # JARVIS on your phone: the WhatsApp watcher and the call page, kept up on their own
             from core import keeper, remote, talk
             def phone_event(text):       # also to daemon.log, so a phone problem can be diagnosed
@@ -991,6 +1007,12 @@ def run_daemon(show: bool = False) -> int:
             panel.events.put(("run", request))
             return {"ok": True, "queued": request}
         command = command.lower()
+        if command == "desk":
+            try:
+                from core import webui
+                return {"ok": True, "url": webui.url() or webui.start()}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
         if command == "ping":
             return {"ok": True, "pid": os.getpid(), "visible": panel.visible, "hotkey_error": hotkey.error}
         if command in ("toggle", "show"):

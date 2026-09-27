@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS</title>
+<link rel="stylesheet" href="/app.css?k=__SECRET__">
+</head>
+<body>
+
+<header id="top">
+  <div class="edge left">
+    <span class="mark">J.A.R.V.I.S</span>
+    <span class="dot" id="onlinedot"></span><span class="tiny" id="online">ONLINE</span>
+  </div>
+  <div class="crest"><svg viewBox="0 0 60 30" class="crestline"><path d="M0 26 L14 26 L20 6 L40 6 L46 26 L60 26"/></svg>
+    <div class="core" id="crestcore"></div>
+  </div>
+  <div class="edge right">
+    <span class="count" id="ready">0/4</span>
+    <span class="tiny">SYSTEMS READY</span>
+  </div>
+</header>
+
+<main>
+  <!-- left column -------------------------------------------------------------------------- -->
+  <section class="column left">
+    <article class="card" id="taskcard">
+      <div class="cardhead"><h2>TASKS</h2><span class="badge" id="taskcount">0</span></div>
+      <div class="cardbody" id="tasks"><p class="quiet">Nothing queued.</p></div>
+      <button class="cardfoot" id="showtasks">TASK DETAIL <span>›</span></button>
+    </article>
+
+    <article class="card" id="memorycard">
+      <div class="cardhead"><h2>MEMORY</h2><span class="glyph">◈</span></div>
+      <div class="cardbody" id="memory"><p class="quiet">Recalling…</p></div>
+      <button class="cardfoot" id="showmemory">VIEW MEMORY <span>›</span></button>
+    </article>
+  </section>
+
+  <!-- the reactor -------------------------------------------------------------------------- -->
+  <section class="stage">
+    <canvas id="reactor"></canvas>
+    <div class="chev left">◁</div>
+    <div class="chev right">▷</div>
+    <div class="saying" id="saying"></div>
+  </section>
+
+  <!-- right column ------------------------------------------------------------------------- -->
+  <section class="column right">
+    <article class="card">
+      <div class="cardhead"><h2>AWARENESS</h2><span class="glyph">◉</span></div>
+      <div class="cardbody" id="awareness"><p class="quiet">Looking around…</p></div>
+      <button class="cardfoot" id="showawareness">VIEW DETAILS <span>›</span></button>
+    </article>
+
+    <article class="card">
+      <div class="cardhead"><h2>SYSTEM</h2><span class="glyph">⬡</span></div>
+      <div class="cardbody rows" id="systems"><p class="quiet">Checking…</p></div>
+      <button class="cardfoot" id="showsystem">SYSTEM STATUS <span>›</span></button>
+    </article>
+  </section>
+</main>
+
+<footer>
+  <form id="askform" autocomplete="off">
+    <input id="ask" type="text" placeholder="Ask JARVIS…" spellcheck="false">
+    <button type="button" id="mic" title="speak">🎙</button>
+  </form>
+  <span class="version" id="version">v 2.0.0</span>
+</footer>
+
+<!-- the proof: a task opened up, with everything it did ------------------------------------- -->
+<div id="sheet" class="sheet">
+  <div class="sheetinner">
+    <div class="sheethead">
+      <h3 id="sheettitle">TASK</h3>
+      <button id="sheetclose">✕</button>
+    </div>
+    <div class="sheetbody" id="sheetbody"></div>
+  </div>
+</div>
+
+<script>window.JARVIS_KEY = "__SECRET__";</script>
+<script src="/app.js?k=__SECRET__"></script>
+</body></html>

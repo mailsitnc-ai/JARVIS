@@ -84,6 +84,9 @@ class Headless:
                 return {"ok": False, "error": "nothing to run"}
             threading.Thread(target=self.ask, args=(request,), daemon=True).start()
             return {"ok": True, "queued": request}
+        if head == "desk":
+            from core import webui
+            return {"ok": True, "url": webui.url() or webui.start()}
         if head == "ping":
             return {"ok": True, "pid": os.getpid(), "headless": True,
                     "up_for": int(time.time() - self.started)}
@@ -102,6 +105,12 @@ class Headless:
         def note(text: str) -> None:
             log.info("phone: %s", text)
 
+        try:
+            from core import webui
+            webui.configure(self.ask, settings=self.settings)
+            note(f"interface at {webui.start()}")
+        except Exception as exc:
+            note(f"interface unavailable: {exc}")
         started = keeper.cloud(self.settings, self.ask)
         if started:
             note(started)

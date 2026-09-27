@@ -129,6 +129,11 @@ DEFAULTS: dict[str, Any] = {
         "address": "",          # https://jarvis.<your-name>.workers.dev
         "poll_s": 20,
     },
+    "desk": {
+        # The full-screen interface (core/webui.py + ui/web): served on this Mac only, behind a
+        # secret made fresh at startup. `jarvis desk` opens it in a native WebKit window.
+        "port": 8766,
+    },
     "memory": {
         "max_interactions": 5000,
         "recall_k": 3,
