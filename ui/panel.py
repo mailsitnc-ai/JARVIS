@@ -10,11 +10,13 @@ import ast
 import logging
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
 import traceback
+from pathlib import Path
 
 from core.config import ARCHIVE_DIR, SKILLS_DIR, load_settings, user_dir
 from ui.reactor import ArcReactor
@@ -1007,6 +1009,19 @@ def run_daemon(show: bool = False) -> int:
             panel.events.put(("run", request))
             return {"ok": True, "queued": request}
         command = command.lower()
+        if command.startswith("desk open"):
+            # Spawned by the daemon on purpose: a child of this process inherits the window session,
+            # which a detached terminal (or a tool shell) does not have.
+            try:
+                here = Path(__file__).resolve().parent.parent
+                argv = [sys.executable, str(here / "jarvis.py"), "desk", "--viewer"]
+                if command.endswith("window"):
+                    argv.append("--window")
+                subprocess.Popen(argv, cwd=str(here), stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return {"ok": True, "opened": True}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
         if command == "desk":
             try:
                 from core import webui

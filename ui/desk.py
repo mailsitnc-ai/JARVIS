@@ -57,7 +57,18 @@ def open_window(url: str, fullscreen: bool = True) -> int:
     return 0
 
 
-def run(fullscreen: bool = True) -> int:
+def ask_jarvis_to_open(fullscreen: bool) -> bool:
+    """Have the running JARVIS open the window. Its children inherit the screen; ours may not."""
+    from window_manager import ipc
+
+    reply = ipc.send("desk open" if fullscreen else "desk open window", timeout=10)
+    return bool(isinstance(reply, dict) and reply.get("opened"))
+
+
+def run(fullscreen: bool = True, viewer: bool = False) -> int:
+    if not viewer and ask_jarvis_to_open(fullscreen):
+        print("Opening JARVIS on your screen.")
+        return 0
     url = address()
     if not url:
         print("JARVIS isn't running, so there is nothing to show yet. Start it with `jarvis on`.")
@@ -66,4 +77,4 @@ def run(fullscreen: bool = True) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(run("--window" not in sys.argv))
+    raise SystemExit(run("--window" not in sys.argv, viewer="--viewer" in sys.argv))
