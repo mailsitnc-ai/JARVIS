@@ -23,6 +23,9 @@ import urllib.request
 
 log = logging.getLogger("jarvis.cloudlink")
 
+# Cloudflare's edge turns away Python's default user agent before the worker ever runs (error 1010,
+# which looks exactly like a wrong password from here), so every call says who it is.
+AGENT = "JARVIS/1.0 (+https://github.com/mailsitnc-ai/JARVIS)"
 POLL = 20.0          # how often the Mac asks whether anything was left for it
 QUIET = 120.0        # how long to back off after the cloud fails to answer
 TIMEOUT = 15.0
@@ -45,8 +48,10 @@ def _call(path: str, data: dict | None = None, timeout: float = TIMEOUT):
         return None
     url = f"{base}{path}{'&' if '?' in path else '?'}s={urllib.parse.quote(key)}"
     body = json.dumps(data).encode("utf-8") if data is not None else None
-    request = urllib.request.Request(url, data=body,
-                                     headers={"Content-Type": "application/json"} if body else {})
+    headers = {"User-Agent": AGENT}
+    if body:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=body, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as answer:
             raw = answer.read().decode("utf-8", "replace")

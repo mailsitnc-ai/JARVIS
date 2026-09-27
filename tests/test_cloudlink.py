@@ -99,6 +99,33 @@ class AddressTests(unittest.TestCase):
         with swap(address=lambda: "https://x.workers.dev", secret=lambda: ""):
             self.assertIn("shared secret", cloudlink.start(lambda _t: ""))
 
+    def test_every_call_says_who_it_is(self):
+        """Without a user agent Cloudflare's edge turns the Mac away with a 403 that looks exactly
+        like a wrong password - an hour of chasing the wrong problem."""
+        seen = []
+
+        class Fake:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        import urllib.request
+        saved = urllib.request.urlopen
+        urllib.request.urlopen = lambda request, timeout=0: seen.append(request) or Fake()
+        try:
+            with swap(address=lambda: "https://x.workers.dev", secret=lambda: "s"):
+                cloudlink.waiting()
+                cloudlink.report({"id": "1", "from": "91"}, "done")
+        finally:
+            urllib.request.urlopen = saved
+        self.assertTrue(all(r.get_header("User-agent") == cloudlink.AGENT for r in seen))
+        self.assertEqual(seen[1].get_header("Content-type"), "application/json")
+
     def test_the_secret_is_carried_on_every_call(self):
         seen = []
 
