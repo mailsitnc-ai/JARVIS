@@ -136,7 +136,9 @@ DEFAULTS: dict[str, Any] = {
         "port": 8766,
         # The interface opens with JARVIS, full screen, because that is the whole point of it.
         "open_at_start": True,
-        "fullscreen": True,
+        # Filling the screen, but still a window: the three traffic lights stay, and it can sit
+        # beside something else. Set this true for macOS fullscreen with no chrome at all.
+        "fullscreen": False,
     },
     "memory": {
         "max_interactions": 5000,

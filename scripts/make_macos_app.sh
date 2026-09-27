@@ -15,6 +15,7 @@ if [ "$(uname)" != "Darwin" ]; then echo "Run this on the Mac."; exit 1; fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$(command -v python3.12 || command -v python3)"
 APP="${1:-$HOME/Desktop/JARVIS.app}"
+ICNS="${2:-$ROOT/ui/JARVIS.icns}"
 [ -n "$PY" ] || { echo "No python3.12/python3 found."; exit 1; }
 echo "Repo: $ROOT"; echo "Python: $PY"; echo "App: $APP"
 
@@ -26,7 +27,9 @@ cat > "$SCPT" <<APPLESCRIPT
 on run
 	with timeout of 999999 seconds
 		set logFile to (POSIX path of (path to library folder from user domain)) & "Logs/JARVIS.log"
-		set cmd to "cd " & quoted form of "$ROOT" & " && " & quoted form of "$PY" & " jarvis.py stop >/dev/null 2>&1; sleep 1; exec " & quoted form of "$PY" & " jarvis.py daemon >> " & quoted form of logFile & " 2>&1"
+			-- Already running? Then this click means "show me", not "start over": a restart costs
+		-- half a minute and throws away whatever JARVIS was in the middle of.
+		set cmd to "cd " & quoted form of "$ROOT" & " && if " & quoted form of "$PY" & " jarvis.py desk >/dev/null 2>&1; then exit 0; fi; exec " & quoted form of "$PY" & " jarvis.py daemon >> " & quoted form of logFile & " 2>&1"
 		do shell script cmd
 	end timeout
 end run
@@ -37,6 +40,8 @@ rm -f "$SCPT"
 # --- 2) patch Info.plist: identity, background-agent, and the privacy usage strings -------------------
 P="$APP/Contents/Info.plist"
 set_key() { /usr/libexec/PlistBuddy -c "Add :$1 $2 $3" "$P" 2>/dev/null || /usr/libexec/PlistBuddy -c "Set :$1 $3" "$P"; }
+# the reactor, at every size macOS asks for
+if [ -f "$ICNS" ]; then cp "$ICNS" "$APP/Contents/Resources/applet.icns"; fi
 set_key CFBundleIdentifier string com.jarvis.assistant
 set_key CFBundleName string JARVIS
 set_key CFBundleDisplayName string JARVIS

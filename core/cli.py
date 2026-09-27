@@ -190,7 +190,7 @@ def cmd_desk(args) -> int:
     """Open the full-screen JARVIS interface."""
     from ui.desk import run
 
-    return run(fullscreen=not args.window, viewer=args.viewer)
+    return run(fullscreen=args.fullscreen, viewer=args.viewer)
 
 
 def cmd_serve(_args) -> int:
@@ -865,7 +865,9 @@ def build_parser() -> argparse.ArgumentParser:
     startup.set_defaults(func=cmd_startup)
 
     desk = sub.add_parser("desk", help="open the full-screen JARVIS interface")
-    desk.add_argument("--window", action="store_true", help="a normal window, for side-by-side work")
+    desk.add_argument("--fullscreen", action="store_true",
+                      help="macOS fullscreen, with no title bar at all")
+    desk.add_argument("--window", action="store_true", help=argparse.SUPPRESS)
     desk.add_argument("--viewer", action="store_true", help=argparse.SUPPRESS)
     desk.set_defaults(func=cmd_desk)
 

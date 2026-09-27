@@ -38,16 +38,41 @@ def in_browser(url: str, why: str = "") -> int:
     return 0
 
 
-def open_window(url: str, fullscreen: bool = True) -> int:
-    """Show the interface in a native WebKit window. Returns 0 once it has been closed."""
+def wear_the_face() -> None:
+    """Give the window a name and a face in the Dock, instead of a bare python rocket."""
+    try:
+        from AppKit import NSApplication, NSImage
+        from Foundation import NSData
+
+        from core.talk import icon_png
+
+        from Foundation import NSProcessInfo
+
+        NSProcessInfo.processInfo().setProcessName_("JARVIS")   # not "Python" in the Dock
+        app = NSApplication.sharedApplication()
+        app.setActivationPolicy_(0)            # a real app: Dock icon, cmd-tab, menu bar
+        data = NSData.dataWithBytes_length_(icon_png(512), len(icon_png(512)))
+        picture = NSImage.alloc().initWithData_(data)
+        if picture is not None:
+            app.setApplicationIconImage_(picture)
+    except Exception:
+        pass                                    # a missing icon is no reason not to open
+
+
+def open_window(url: str, fullscreen: bool = False) -> int:
+    """Show the interface in a native WebKit window. Returns 0 once it has been closed.
+
+    Filling the screen is not the same as macOS fullscreen: a maximised window keeps the three
+    traffic lights and can be put beside something else, which is the point of being a window."""
     try:
         import webview
     except ImportError:
         return in_browser(url, "install pywebview for the proper window: "
                                "python3 -m pip install --user pywebview")
-    webview.create_window("JARVIS", url, fullscreen=fullscreen,
+    wear_the_face()
+    webview.create_window("JARVIS", url, fullscreen=fullscreen, maximized=not fullscreen,
                           width=1440, height=900, background_color="#05070c",
-                          frameless=fullscreen, easy_drag=False)
+                          frameless=False, easy_drag=False, text_select=True)
     began = time.monotonic()
     webview.start(gui="cocoa")
     # A window that "closes" in the first moment never opened: the process has no session with the
@@ -65,7 +90,7 @@ def ask_jarvis_to_open(fullscreen: bool) -> bool:
     return bool(isinstance(reply, dict) and reply.get("opened"))
 
 
-def run(fullscreen: bool = True, viewer: bool = False) -> int:
+def run(fullscreen: bool = False, viewer: bool = False) -> int:
     if not viewer and ask_jarvis_to_open(fullscreen):
         print("Opening JARVIS on your screen.")
         return 0
@@ -77,4 +102,4 @@ def run(fullscreen: bool = True, viewer: bool = False) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(run("--window" not in sys.argv, viewer="--viewer" in sys.argv))
+    raise SystemExit(run("--fullscreen" in sys.argv, viewer="--viewer" in sys.argv))

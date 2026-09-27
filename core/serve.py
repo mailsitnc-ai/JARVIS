@@ -102,6 +102,9 @@ class Headless:
                 return {"ok": False, "error": "nothing to run"}
             threading.Thread(target=self.ask, args=(request,), daemon=True).start()
             return {"ok": True, "queued": request}
+        if command.startswith("desk open"):
+            self.summon()
+            return {"ok": True, "opened": True}
         if head == "desk":
             from core import webui
             return {"ok": True, "url": webui.url() or webui.start()}
@@ -111,7 +114,7 @@ class Headless:
         if head in ("quit", "exit", "stop"):
             STOP.set()
             return {"ok": True}
-        if head in ("show", "toggle") or command.startswith("desk open"):
+        if head in ("show", "toggle"):
             self.summon()
             return {"ok": True, "opened": True}
         if head == "hide":
@@ -162,8 +165,8 @@ class Headless:
         import subprocess
 
         argv = [sys.executable, str(ROOT / "jarvis.py"), "desk", "--viewer"]
-        if not fullscreen:
-            argv.append("--window")
+        if fullscreen:
+            argv.append("--fullscreen")
         try:
             self.viewer = subprocess.Popen(argv, cwd=str(ROOT), stdin=subprocess.DEVNULL,
                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -302,7 +305,7 @@ def run(settings=None, desktop: bool = False) -> int:
         engine.reminders()
         engine.hotkeys()
         if settings.get("desk.open_at_start", True):
-            engine.desk_open(fullscreen=bool(settings.get("desk.fullscreen", True)))
+            engine.desk_open(fullscreen=bool(settings.get("desk.fullscreen", False)))
             log.info("interface opened on the screen")
     try:
         while not STOP.wait(1.0):
