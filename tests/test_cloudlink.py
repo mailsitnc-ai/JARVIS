@@ -92,6 +92,23 @@ class DoingWorkTests(unittest.TestCase):
             self.assertEqual(cloudlink.once(lambda _t: "x", jobs=[{"id": "j", "text": "  "}]), 0)
 
 
+class CleaningTests(unittest.TestCase):
+    """The cloud's marker, and the model's habit of repeating it."""
+
+    def test_a_plain_request_is_left_alone(self):
+        self.assertEqual(cloudlink.cleaned("open my notes"), "open my notes")
+
+    def test_the_marker_is_stripped(self):
+        self.assertEqual(cloudlink.cleaned("LAPTOP: open my notes"), "open my notes")
+
+    def test_a_repeated_marker_does_not_double_the_request(self):
+        mangled = "what's my battery LAPTOP: what's my battery"
+        self.assertEqual(cloudlink.cleaned(mangled), "what's my battery")
+
+    def test_nothing_at_all_is_not_a_request(self):
+        self.assertEqual(cloudlink.cleaned(None), "")
+
+
 class AddressTests(unittest.TestCase):
     def test_it_says_what_is_missing_rather_than_failing_quietly(self):
         with swap(address=lambda: "", secret=lambda: "s"):

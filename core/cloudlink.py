@@ -79,11 +79,23 @@ def report(job: dict, answer: str) -> bool:
     return isinstance(done, dict) and bool(done.get("ok"))
 
 
+def cleaned(text: str) -> str:
+    """The words to actually carry out.
+
+    The cloud marks a job for the Mac by starting its answer with "LAPTOP:", and a model being
+    helpful sometimes says it twice - "do the thingLAPTOP: do the thing". Whatever follows the last
+    marker is the request; the rest is the model talking to itself."""
+    import re
+
+    parts = re.split(r"LAPTOP:\s*", str(text or ""), flags=re.IGNORECASE)
+    return (parts[-1] if parts else str(text or "")).strip()
+
+
 def once(ask, jobs=None) -> int:
     """Take whatever is waiting, do it, answer it. Returns how many were carried out."""
     done = 0
     for job in (waiting() if jobs is None else jobs):
-        request = str(job.get("text") or "").strip()
+        request = cleaned(job.get("text"))
         if not request:
             continue
         log.info("cloud left me: %s", request)

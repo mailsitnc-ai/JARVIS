@@ -87,8 +87,10 @@ async function handle(message, env) {
   const history = JSON.parse((await env.JARVIS.get('history:' + message.from)) || '[]');
   let answer = await think(message.text, history, env);
 
-  if (/^LAPTOP:/i.test(answer)) {
-    const job = answer.replace(/^LAPTOP:\s*/i, '').trim();
+  if (/LAPTOP:/i.test(answer)) {
+    /* Whatever follows the LAST marker is the request - a model being helpful sometimes repeats
+       itself, "do the thingLAPTOP: do the thing", and the Mac should not be handed that. */
+    const job = answer.split(/LAPTOP:\s*/i).pop().trim();
     await queue(job, message.from, env);
     answer = "That one's for the Mac, sir. It's on the list and I'll run it the moment it's awake.";
   }
