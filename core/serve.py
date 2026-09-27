@@ -14,8 +14,12 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
 
 log = logging.getLogger("jarvis.serve")
 
@@ -30,14 +34,23 @@ class Headless:
 
         self.settings = settings or load_settings()
         self.jarvis = None
+        self.viewer = None          # the interface window, when one is open
+        self.listeners: list = []   # the global shortcuts
         self.started = time.time()
 
     # ---- the engine ------------------------------------------------------------------------------
     def boot(self) -> None:
         from core.orchestrator import Jarvis
 
-        self.jarvis = Jarvis(on_event=lambda stage, message: log.info("%s: %s", stage, message),
-                             confirm=self.confirm)
+        def engine_event(stage, message):
+            log.info("%s: %s", stage, message)
+            try:
+                from core import webui
+                webui.step(stage, message)     # shown live under whatever task is running
+            except Exception:
+                pass
+
+        self.jarvis = Jarvis(on_event=engine_event, confirm=self.confirm)
         for filename, error in self.jarvis.registry.errors.items():
             log.warning("skill %s failed to load: %s", filename, error)
         log.info("engine up with %d skills", len(self.jarvis.registry.skills))
@@ -58,14 +71,19 @@ class Headless:
         return answer
 
     def confirm(self, req) -> str:
-        """Nobody is sitting here to approve anything, so ask whoever is on the other end. If the
-        request didn't come from a channel that can ask, it is refused - silently doing risky things
-        on an unattended machine is worse than refusing."""
+        """Ask whoever can answer: the phone that sent the request, or the person at the screen.
+        If neither is there it is refused - silently doing risky things unattended is worse."""
         try:
             from core import remote
             channel = remote.current()
             if channel is not None:
                 return channel.confirm(req)
+        except Exception:
+            pass
+        try:
+            from core import webui
+            if webui.running():
+                return webui.confirm(req)
         except Exception:
             pass
         log.info("refused %s - no one here to approve it", getattr(req, "summary", req))
@@ -93,8 +111,17 @@ class Headless:
         if head in ("quit", "exit", "stop"):
             STOP.set()
             return {"ok": True}
-        if head in ("show", "hide", "toggle"):
-            return {"ok": True, "note": "there is no window here - this JARVIS has no screen"}
+        if head in ("show", "toggle") or command.startswith("desk open"):
+            self.summon()
+            return {"ok": True, "opened": True}
+        if head == "hide":
+            return {"ok": True, "note": "close the window yourself, sir - it is a window"}
+        if head == "interrupt":
+            self.interrupt()
+            return {"ok": True}
+        if head in ("clear", "reset", "refresh"):
+            self.forget()
+            return {"ok": True}
         return {"ok": False, "error": f"unknown command {command!r}"}
 
     # ---- the channels ----------------------------------------------------------------------------
@@ -129,20 +156,140 @@ class Headless:
                          args=(self.settings,), kwargs={"log": note}, daemon=True).start()
 
 
-def run(settings=None) -> int:
+    # ---- the screen -------------------------------------------------------------------------
+    def desk_open(self, fullscreen: bool = True) -> bool:
+        """Put the interface on the screen. A child of this process inherits the window session."""
+        import subprocess
+
+        argv = [sys.executable, str(ROOT / "jarvis.py"), "desk", "--viewer"]
+        if not fullscreen:
+            argv.append("--window")
+        try:
+            self.viewer = subprocess.Popen(argv, cwd=str(ROOT), stdin=subprocess.DEVNULL,
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except Exception:
+            log.exception("couldn't open the interface")
+            return False
+
+    def summon(self) -> None:
+        """Ctrl+Shift+J. Bring the interface up - or back, if it was closed."""
+        alive = self.viewer is not None and self.viewer.poll() is None
+        if alive:
+            import subprocess
+            subprocess.run(["osascript", "-e",
+                            'tell application "System Events" to set frontmost of '
+                            '(first process whose unix id is %d) to true' % self.viewer.pid],
+                           capture_output=True)
+            return
+        self.desk_open()
+
+    def interrupt(self) -> None:
+        """Ctrl+Shift+C. Stop whatever is being worked on."""
+        if self.jarvis is not None:
+            try:
+                self.jarvis.interrupt()
+            except Exception:
+                log.exception("interrupt failed")
+        from core import webui
+        webui.push("event", text="Stopped.")
+
+    def forget(self) -> None:
+        """Ctrl+Shift+R. A clean slate: the screen and the short conversation memory both."""
+        if self.jarvis is not None:
+            try:
+                self.jarvis.history.clear()
+            except Exception:
+                pass
+        from core import webui
+        webui.forget()
+
+    def hotkeys(self) -> None:
+        from window_manager.hotkey import HotkeyListener
+
+        wanted = [(str(self.settings.get("window.hotkey", "ctrl+shift+j")), self.summon,
+                   0x4A41, "summon"),
+                  (str(self.settings.get("window.interrupt_hotkey", "ctrl+shift+c")),
+                   self.interrupt, 0x4A42, "interrupt"),
+                  (str(self.settings.get("window.reset_hotkey", "ctrl+shift+r")),
+                   self.forget, 0x4A43, "reset")]
+        for spec, action, ident, what in wanted:
+            try:
+                listener = HotkeyListener(spec, action, hotkey_id=ident, name=f"jarvis-{what}")
+                listener.start()
+                listener.ready.wait(3)
+                if listener.error:
+                    log.warning("%s shortcut (%s): %s", what, spec, listener.error)
+                else:
+                    log.info("%s on %s", what, spec)
+                self.listeners.append(listener)
+            except Exception as exc:
+                log.warning("%s shortcut unavailable: %s", what, exc)
+
+    def voice(self) -> None:
+        """Say "Jarvis, ..." out loud, as before - the ear is the engine's, not the window's."""
+        try:
+            from core import voice
+
+            voice.configure(on_command=lambda text: self.ask(text),
+                            on_state=lambda state, detail=None: _push("voice", state=state),
+                            settings=self.settings)
+            if self.settings.get("voice.enabled", False):
+                log.info("voice: %s", voice.start())
+        except Exception as exc:
+            log.warning("voice unavailable: %s", exc)
+
+    def reminders(self) -> None:
+        try:
+            from core import oslayer, reminders
+
+            reminders.start_loop(emit=lambda text: _push("event", text=f"\u23f0 {text}"),
+                                 speak=self.say,
+                                 notify=lambda text: oslayer.notify(text, "JARVIS"))
+        except Exception as exc:
+            log.warning("reminders unavailable: %s", exc)
+        try:
+            from core import sentinel
+
+            sentinel.start(self.settings, emit=lambda text: _push("event", text=f"\u26a0 {text}"),
+                           speak=self.say)
+        except Exception as exc:
+            log.warning("alerts unavailable: %s", exc)
+
+    def say(self, text: str) -> None:
+        try:
+            from core import voice
+            speaker = voice.speaker()
+            if speaker is not None:
+                speaker.say(text)
+        except Exception:
+            pass
+
+
+def _push(kind: str, **fields) -> None:
+    try:
+        from core import webui
+        webui.push(kind, **fields)
+    except Exception:
+        pass
+
+
+def run(settings=None, desktop: bool = False) -> int:
     """Start a headless JARVIS and stay up until something asks it to stop."""
     from core.config import load_settings, user_dir
     from window_manager.ipc import ControlServer
 
     settings = settings or load_settings()
-    logging.basicConfig(filename=str(user_dir() / "serve.log"), level=logging.INFO,
+    logging.basicConfig(filename=str(user_dir() / ("daemon.log" if desktop else "serve.log")),
+                        level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     engine = Headless(settings)
     control = ControlServer(engine.on_command, int(settings.get("window.ipc_port", 47821)))
     control.start()
     log.info("JARVIS serving headless (pid %s, control port %s)", os.getpid(), control.port)
-    print(f"JARVIS is serving with no screen (pid {os.getpid()}, control port {control.port}). "
-          f"Log: {user_dir() / 'serve.log'}", flush=True)
+    print(("JARVIS is up (pid %d, control port %d)." % (os.getpid(), control.port)) if desktop else
+          ("JARVIS is serving with no screen (pid %d, control port %d)." % (os.getpid(), control.port)),
+          flush=True)
     try:
         engine.boot()
     except Exception:
@@ -150,6 +297,13 @@ def run(settings=None) -> int:
         print("JARVIS failed to start - see the log.", flush=True)
         return 1
     engine.channels()
+    if desktop:
+        engine.voice()
+        engine.reminders()
+        engine.hotkeys()
+        if settings.get("desk.open_at_start", True):
+            engine.desk_open(fullscreen=bool(settings.get("desk.fullscreen", True)))
+            log.info("interface opened on the screen")
     try:
         while not STOP.wait(1.0):
             pass

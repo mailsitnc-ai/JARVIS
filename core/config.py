@@ -67,8 +67,9 @@ DEFAULTS: dict[str, Any] = {
         "allow_risky_calls": False,
     },
     "window": {
-        "hotkey": "ctrl+alt+j",
-        "interrupt_hotkey": "ctrl+alt+c",  # stop whatever JARVIS is currently doing
+        "hotkey": "ctrl+shift+j",          # bring the interface to the front
+        "interrupt_hotkey": "ctrl+shift+c",  # stop whatever JARVIS is currently doing
+        "reset_hotkey": "ctrl+shift+r",      # clean slate: the screen and the short memory both
         # Which browser to open links/searches/tabs in: "chrome" reuses your Chrome window;
         # "default" uses the OS default; also "edge"/"firefox"/"brave" or a full path to the .exe.
         "browser": "chrome",
@@ -133,6 +134,9 @@ DEFAULTS: dict[str, Any] = {
         # The full-screen interface (core/webui.py + ui/web): served on this Mac only, behind a
         # secret made fresh at startup. `jarvis desk` opens it in a native WebKit window.
         "port": 8766,
+        # The interface opens with JARVIS, full screen, because that is the whole point of it.
+        "open_at_start": True,
+        "fullscreen": True,
     },
     "memory": {
         "max_interactions": 5000,

@@ -114,10 +114,21 @@ class ControlPortTests(unittest.TestCase):
         self.assertTrue(self.headless.on_command("quit")["ok"])
         self.assertTrue(serve.STOP.is_set())
 
-    def test_window_commands_are_answered_politely_not_with_a_crash(self):
+    def test_show_puts_the_interface_on_the_screen(self):
+        """There is no panel any more: 'show' means bring the window up."""
+        asked = []
+        self.headless.summon = lambda: asked.append(1)
         out = self.headless.on_command("show")
         self.assertTrue(out["ok"])
-        self.assertIn("no screen", out["note"])
+        self.assertEqual(len(asked), 1)
+
+    def test_stopping_the_work_and_wiping_the_slate_are_both_reachable(self):
+        done = []
+        self.headless.interrupt = lambda: done.append("interrupt")
+        self.headless.forget = lambda: done.append("forget")
+        self.headless.on_command("interrupt")
+        self.headless.on_command("reset")
+        self.assertEqual(done, ["interrupt", "forget"])
 
     def test_nonsense_is_refused(self):
         self.assertFalse(self.headless.on_command("make me a sandwich")["ok"])

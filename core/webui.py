@@ -64,6 +64,7 @@ class Desk:
         self.speak = speak
         self.feed = Feed()
         self.tasks: list[dict] = []
+        self.waiting: dict[str, dict] = {}     # approvals the screen has not answered yet
         self.started = time.time()
         self._lock = threading.Lock()
 
@@ -99,6 +100,43 @@ class Desk:
                 self.speak(answer)
             except Exception:
                 pass
+
+    def ask_permission(self, req, wait: float = 180.0) -> str:
+        """Put an approval in front of whoever is at the screen and wait for the answer.
+
+        The old panel had buttons; this is where they went. Nobody there, or nobody deciding,
+        means no - an unattended machine should not quietly do risky things."""
+        ident = uuid.uuid4().hex[:8]
+        answered = threading.Event()
+        pending = {"decision": "deny", "event": answered}
+        with self._lock:
+            self.waiting[ident] = pending
+        self.feed.push("confirm", id=ident,
+                       summary=str(getattr(req, "summary", req) or "")[:300],
+                       details=str(getattr(req, "details", "") or "")[:600],
+                       capability=str(getattr(req, "capability", "") or ""))
+        answered.wait(timeout=wait)
+        with self._lock:
+            self.waiting.pop(ident, None)
+        self.feed.push("confirmed", id=ident, decision=pending["decision"])
+        return pending["decision"]
+
+    def decide(self, ident: str, decision: str) -> bool:
+        """The answer coming back from the interface."""
+        choice = decision if decision in ("once", "always", "deny") else "deny"
+        with self._lock:
+            pending = self.waiting.get(ident)
+        if pending is None:
+            return False
+        pending["decision"] = choice
+        pending["event"].set()
+        return True
+
+    def forget(self) -> None:
+        """Ctrl+Shift+R: wipe the screen and the short conversation memory both."""
+        with self._lock:
+            self.tasks.clear()
+        self.feed.push("reset")
 
     def step(self, stage: str, message: str) -> None:
         """A line of working-out from the engine. It belongs to whatever is running now."""
@@ -301,6 +339,9 @@ class Server:
                 if route == "/ask":
                     out = desk.submit(str(sent.get("text") or ""), bool(sent.get("spoken")))
                     return self._send(200, json.dumps(out), "application/json")
+                if route == "/decide":
+                    ok = desk.decide(str(sent.get("id") or ""), str(sent.get("decision") or "deny"))
+                    return self._send(200, json.dumps({"ok": ok}), "application/json")
                 return self._send(404, "no such page")
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
@@ -364,6 +405,18 @@ def push(kind: str, **fields) -> None:
     """Send something to the interface - an event, a reply, a change of voice state."""
     if running():
         _ACTIVE.desk.feed.push(kind, **fields)
+
+
+def confirm(req) -> str:
+    """The engine asking permission. Routed to the interface; refused if there is no interface."""
+    if running():
+        return _ACTIVE.desk.ask_permission(req)
+    return "deny"
+
+
+def forget() -> None:
+    if running():
+        _ACTIVE.desk.forget()
 
 
 def step(stage: str, message: str) -> None:

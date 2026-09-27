@@ -207,3 +207,18 @@ footer { height: 92px; flex: none; position: relative; display: grid; place-item
   main { grid-template-columns: 1fr; }
   .column.left { display: none; }
 }
+
+/* ---- an approval, where the panel's buttons used to be ---------------------------------- */
+.sheetinner.permit { width: min(560px, 82vw); }
+.asking { font-size: 16px; color: var(--ink); margin-bottom: 8px; }
+.detail { font-size: 13px; color: var(--quiet); margin-bottom: 20px; white-space: pre-wrap; }
+.choices { display: flex; gap: 10px; justify-content: flex-end; }
+.choices button {
+  font: inherit; font-size: 13px; padding: 9px 18px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--glassline); background: rgba(73, 184, 255, .14); color: var(--cyan);
+}
+.choices .yes:hover { background: rgba(73, 184, 255, .26); }
+.choices .soft { color: var(--quiet); background: rgba(90, 170, 255, .07); }
+.choices .no { color: #ffb4b4; background: rgba(255, 107, 107, .12);
+               border-color: rgba(255, 107, 107, .35); }
+.choices .no:hover { background: rgba(255, 107, 107, .22); }

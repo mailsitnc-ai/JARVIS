@@ -349,14 +349,14 @@ class UnderstandingTests(IsolatedCase):
 
 class SkillsManagerTests(IsolatedCase):
     def test_meta_reader_and_disable_hides_from_loader(self):
-        from ui.panel import _skill_meta_from_file
+        from core.skill_loader import meta_from_file
 
         skills_dir = self.tmp / "skills"
         skills_dir.mkdir()
         path = skills_dir / "greet.py"
         path.write_text("SKILL = {'name': 'greet', 'description': 'says hi', 'triggers': ['hello'], "
                         "'origin': 'evolved'}\ndef run(request, context):\n    return 'hi'\n", encoding="utf-8")
-        meta = _skill_meta_from_file(path)
+        meta = meta_from_file(path)
         self.assertEqual((meta["name"], meta["origin"]), ("greet", "evolved"))
 
         registry = SkillRegistry(skills_dir)

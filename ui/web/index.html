@@ -69,6 +69,22 @@
   <span class="version" id="version">v 2.0.0</span>
 </footer>
 
+<!-- permission: the engine wants to do something that needs a yes ------------------------- -->
+<div id="permit" class="sheet">
+  <div class="sheetinner permit">
+    <div class="sheethead"><h3>PERMISSION</h3></div>
+    <div class="sheetbody">
+      <p class="asking" id="asking"></p>
+      <p class="detail" id="askingdetail"></p>
+      <div class="choices">
+        <button id="once" class="yes">Allow once</button>
+        <button id="always" class="yes soft">Always allow</button>
+        <button id="deny" class="no">No</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- the proof: a task opened up, with everything it did ------------------------------------- -->
 <div id="sheet" class="sheet">
   <div class="sheetinner">

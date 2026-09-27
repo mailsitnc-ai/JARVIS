@@ -174,9 +174,9 @@ def cmd_daemon(args) -> int:
             ipc.send("show")
         print("JARVIS is already running.")
         return 0
-    from ui.panel import run_daemon
+    from core.serve import run
 
-    return run_daemon(show=args.show)
+    return run(desktop=True)
 
 
 def _startup_link() -> Path:
@@ -197,7 +197,7 @@ def cmd_serve(_args) -> int:
     """JARVIS with no screen - what runs on the always-on machine."""
     from .serve import run
 
-    return run()
+    return run(desktop=False)
 
 
 def _launch_agent_plist() -> Path:

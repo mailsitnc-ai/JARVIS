@@ -5,20 +5,11 @@ from tests.helpers import IsolatedCase
 from window_manager import ipc, win32
 from window_manager.hotkey import parse_hotkey
 from window_manager.ipc import ControlServer
-from window_manager.split import compute_layout
 from window_manager.win32 import Rect
 
 
-class LayoutTests(unittest.TestCase):
-    def test_sixty_forty_on_this_laptop(self):
-        main, jarvis = compute_layout(Rect(0, 0, 1280, 760), 0.6, "right")
-        self.assertEqual(main, Rect(0, 0, 768, 760))
-        self.assertEqual(jarvis, Rect(768, 0, 512, 760))
-
-    def test_left_side_and_offset_monitor(self):
-        main, jarvis = compute_layout(Rect(1920, 40, 1000, 1000), 0.6, "left")
-        self.assertEqual(jarvis, Rect(1920, 40, 400, 1000))
-        self.assertEqual(main, Rect(2320, 40, 600, 1000))
+class ScreenTests(unittest.TestCase):
+    """The 60/40 docking went with the Tk panel; the screen itself is still worth knowing."""
 
     def test_work_area_is_real(self):
         area = win32.work_area()

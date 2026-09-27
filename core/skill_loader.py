@@ -1,6 +1,8 @@
 """Discovers skills in /skills and hot-reloads them when files are added, changed or removed."""
 from __future__ import annotations
 
+import ast
+
 import importlib
 import importlib.util
 import re
@@ -138,3 +140,19 @@ class SkillRegistry:
 
     def summaries(self) -> str:
         return "\n".join(f"- {s.name}: {s.description}" for s in sorted(self.skills.values(), key=lambda s: s.name))
+
+
+def meta_from_file(path) -> dict:
+    """Read a skill file's SKILL dict without executing it (works for disabled files too)."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "SKILL" for t in node.targets):
+            try:
+                meta = ast.literal_eval(node.value)
+                return meta if isinstance(meta, dict) else {}
+            except (ValueError, SyntaxError):
+                return {}
+    return {}

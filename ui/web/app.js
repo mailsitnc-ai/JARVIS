@@ -287,6 +287,18 @@ function listen() {
     } else if (m.kind === 'answer') {
       say(m.text);
       want = 0.2;
+    } else if (m.kind === 'confirm') {
+      $('asking').textContent = m.summary || 'JARVIS wants to do something.';
+      $('askingdetail').textContent = m.details || '';
+      $('permit').dataset.id = m.id;
+      $('permit').classList.add('show');
+      want = 0.5;
+    } else if (m.kind === 'confirmed') {
+      if ($('permit').dataset.id === m.id) $('permit').classList.remove('show');
+    } else if (m.kind === 'reset') {
+      tasks.clear(); paintTasks();
+      $('saying').classList.remove('show');
+      say('Clean slate, sir.');
     } else if (m.kind === 'voice') {
       want = m.level != null ? m.level : (m.state === 'listening' ? 0.6 : 0.15);
     }
@@ -319,6 +331,16 @@ $('mic').addEventListener('click', () => {
   rec.onend = () => { $('mic').classList.remove('on'); want = 0.15; };
   try { rec.start(); } catch (err) { $('mic').classList.remove('on'); }
 });
+
+function decide(choice) {
+  const id = $('permit').dataset.id;
+  $('permit').classList.remove('show');
+  fetch('/decide?k=' + KEY, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                             body: JSON.stringify({id, decision: choice})}).catch(() => {});
+}
+$('once').onclick = () => decide('once');
+$('always').onclick = () => decide('always');
+$('deny').onclick = () => decide('deny');
 
 $('sheetclose').onclick = () => $('sheet').classList.remove('show');
 $('sheet').onclick = (e) => { if (e.target === $('sheet')) $('sheet').classList.remove('show'); };
